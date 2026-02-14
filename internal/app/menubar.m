@@ -80,7 +80,7 @@ static menubar_config_t g_config = {
     .status_bar_width = 28,
     .status_bar_height = 18,
     .sparkline_width = 420,
-    .sparkline_height = 60,
+    .sparkline_height = 80,
     .show_cpu = 1,
     .show_gpu = 1,
     .show_ane = 1,
@@ -917,7 +917,7 @@ static NSImage *drawSparklineChart(double *history, int count, NSColor *color,
   }
   [color set];
   [linePath stroke];
-  NSFont *labelFont = [NSFont systemFontOfSize:12 weight:NSFontWeightBold];
+  NSFont *labelFont = [NSFont systemFontOfSize:13 weight:NSFontWeightBold];
   NSDictionary *labelAttrs = @{
     NSFontAttributeName : labelFont,
     NSForegroundColorAttributeName : color
@@ -926,7 +926,7 @@ static NSImage *drawSparklineChart(double *history, int count, NSColor *color,
       withAttributes:labelAttrs];
   NSString *valStr =
       valOverride ?: [NSString stringWithFormat:@"%.1f%%", currentVal];
-  NSFont *valFont = [NSFont monospacedDigitSystemFontOfSize:13
+  NSFont *valFont = [NSFont monospacedDigitSystemFontOfSize:14
                                                      weight:NSFontWeightBold];
   NSDictionary *valAttrs = @{
     NSFontAttributeName : valFont,

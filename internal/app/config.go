@@ -62,7 +62,7 @@ func loadMenuBarConfig() MenuBarConfig {
 		StatusBarWidth:  24,
 		StatusBarHeight: 18,
 		SparklineWidth:  300,
-		SparklineHeight: 40,
+		SparklineHeight: 80,
 		FontSize:        10,
 		PowerFontSize:   11,
 	}
