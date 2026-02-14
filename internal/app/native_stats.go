@@ -71,11 +71,20 @@ static void ifm_subtype_to_string(int subtype, char *buf, size_t bufsize) {
 #ifdef IFM_2500_T
         case IFM_2500_T:    snprintf(buf, bufsize, "2500baseT"); break;
 #endif
+#ifdef IFM_2500_SX
+        case IFM_2500_SX:   snprintf(buf, bufsize, "2500baseSX"); break;
+#endif
 #ifdef IFM_5000_T
         case IFM_5000_T:    snprintf(buf, bufsize, "5000baseT"); break;
 #endif
 #ifdef IFM_10G_T
         case IFM_10G_T:     snprintf(buf, bufsize, "10GbaseT"); break;
+#endif
+#ifdef IFM_10G_SR
+        case IFM_10G_SR:    snprintf(buf, bufsize, "10GbaseSR"); break;
+#endif
+#ifdef IFM_10G_LR
+        case IFM_10G_LR:    snprintf(buf, bufsize, "10GbaseLR"); break;
 #endif
         default:            snprintf(buf, bufsize, "unknown"); break;
     }

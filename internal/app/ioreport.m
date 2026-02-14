@@ -81,6 +81,17 @@ int get_wifi_link_info(wifi_link_info_t *info) {
       snprintf(info->phy_mode, sizeof(info->phy_mode), "802.11ax");
       snprintf(info->wifi_generation, sizeof(info->wifi_generation), "Wi-Fi 6");
       break;
+#ifdef kCWPHYMode11be
+    case kCWPHYMode11be:
+      snprintf(info->phy_mode, sizeof(info->phy_mode), "802.11be");
+      snprintf(info->wifi_generation, sizeof(info->wifi_generation), "Wi-Fi 7");
+      break;
+#else
+    case 7: // kCWPHYMode11be not yet in SDK enum
+      snprintf(info->phy_mode, sizeof(info->phy_mode), "802.11be");
+      snprintf(info->wifi_generation, sizeof(info->wifi_generation), "Wi-Fi 7");
+      break;
+#endif
     default:
       snprintf(info->phy_mode, sizeof(info->phy_mode), "Unknown");
       snprintf(info->wifi_generation, sizeof(info->wifi_generation), "");

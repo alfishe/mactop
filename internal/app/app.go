@@ -1038,9 +1038,13 @@ func updateNetDiskUI(netdiskMetrics NetDiskMetrics) {
 
 	// Build network line with link speed info
 	linkInfo := ""
-	if len(ethInfo) > 0 && ethInfo[0].LinkUp {
-		linkInfo = FormatLinkSpeed(ethInfo[0].LinkSpeedMbps)
-	} else if wifiInfo != nil && wifiInfo.IsConnected {
+	for _, eth := range ethInfo {
+		if eth.LinkUp {
+			linkInfo = FormatLinkSpeed(eth.LinkSpeedMbps)
+			break
+		}
+	}
+	if linkInfo == "" && wifiInfo != nil && wifiInfo.IsConnected {
 		if wifiInfo.WiFiGeneration != "" {
 			linkInfo = fmt.Sprintf("%s", wifiInfo.WiFiGeneration)
 		} else {
