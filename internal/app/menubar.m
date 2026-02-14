@@ -43,6 +43,7 @@ typedef struct {
   double disk_read_kb_per_sec;
   double disk_write_kb_per_sec;
   double tflops_fp32;
+  char rdma_status[64];
 } menubar_metrics_t;
 
 // Config passed from Go
@@ -141,15 +142,15 @@ static NSColor *cpuColor(void) {
 }
 static NSColor *gpuColor(void) {
   NSColor *c = colorFromHex(g_config.gpu_color);
-  return c ?: [NSColor systemCyanColor];
+  return c ?: [NSColor systemOrangeColor];
 }
 static NSColor *aneColor(void) {
   NSColor *c = colorFromHex(g_config.ane_color);
-  return c ?: [NSColor systemPurpleColor];
+  return c ?: [NSColor systemCyanColor];
 }
 static NSColor *memColor(void) {
   NSColor *c = colorFromHex(g_config.mem_color);
-  return c ?: [NSColor systemOrangeColor];
+  return c ?: [NSColor systemPurpleColor];
 }
 
 static NSColor *labelDimColor(void) {
@@ -268,6 +269,7 @@ static NSColor *headerColor(void) { return [NSColor whiteColor]; }
 @property(strong, nonatomic) NSMenuItem *memUsageItem;
 @property(strong, nonatomic) NSMenuItem *memSwapItem;
 @property(strong, nonatomic) NSMenuItem *netItem;
+@property(strong, nonatomic) NSMenuItem *rdmaItem;
 @property(strong, nonatomic) NSMenuItem *diskItem;
 @property(strong, nonatomic) NSMenuItem *powerTotalItem;
 @property(strong, nonatomic) NSMenuItem *powerPackageItem;
@@ -302,6 +304,12 @@ static NSColor *headerColor(void) { return [NSColor whiteColor]; }
                                  processPath];
   NSAppleScript *appleScript = [[NSAppleScript alloc] initWithSource:script];
   [appleScript executeAndReturnError:nil];
+}
+
+- (void)openGitHub:(id)sender {
+  (void)sender;
+  [[NSWorkspace sharedWorkspace]
+      openURL:[NSURL URLWithString:@"https://github.com/metaspartan/mactop"]];
 }
 
 // Settings toggles — persist after each change
@@ -486,12 +494,14 @@ static NSColor *headerColor(void) { return [NSColor whiteColor]; }
   [v setTwoToneLabel:@"  RAM:       "
                value:[NSString stringWithFormat:@"%.1f / %.0f GB (%.1f%%)",
                                                 memUsedGB, memTotalGB, memPct]];
-  double swapUsedMB = (double)metrics.swap_used_bytes / (1024.0 * 1024.0);
-  double swapTotalMB = (double)metrics.swap_total_bytes / (1024.0 * 1024.0);
+  double swapUsedGB =
+      (double)metrics.swap_used_bytes / (1024.0 * 1024.0 * 1024.0);
+  double swapTotalGB =
+      (double)metrics.swap_total_bytes / (1024.0 * 1024.0 * 1024.0);
   v = (MactopMetricView *)self.memSwapItem.view;
   [v setTwoToneLabel:@"  Swap:      "
-               value:[NSString stringWithFormat:@"%.0f / %.0f MB", swapUsedMB,
-                                                swapTotalMB]];
+               value:[NSString stringWithFormat:@"%.1f / %.1f GB", swapUsedGB,
+                                                swapTotalGB]];
 
   // Network
   v = (MactopMetricView *)self.netItem.view;
@@ -502,6 +512,9 @@ static NSColor *headerColor(void) { return [NSColor whiteColor]; }
                                               metrics.net_in_bytes_per_sec),
                                           formatThroughput(
                                               metrics.net_out_bytes_per_sec)]];
+  v = (MactopMetricView *)self.rdmaItem.view;
+  [v setTwoToneLabel:@"  RDMA:    "
+               value:[NSString stringWithUTF8String:metrics.rdma_status]];
 
   // Disk
   v = (MactopMetricView *)self.diskItem.view;
@@ -622,7 +635,7 @@ static NSMenuItem *makeBrandingItem(void) {
 
   NSMutableAttributedString *as = [[NSMutableAttributedString alloc] init];
   [as appendAttributedString:[[NSAttributedString alloc]
-                                 initWithString:@"mactop  "
+                                 initWithString:@"mactop"
                                      attributes:@{
                                        NSFontAttributeName : [NSFont
                                            systemFontOfSize:14
@@ -630,15 +643,6 @@ static NSMenuItem *makeBrandingItem(void) {
                                        NSForegroundColorAttributeName :
                                            [NSColor whiteColor]
                                      }]];
-  [as appendAttributedString:
-          [[NSAttributedString alloc]
-              initWithString:@"by Carsen Klock"
-                  attributes:@{
-                    NSFontAttributeName :
-                        [NSFont systemFontOfSize:11 weight:NSFontWeightRegular],
-                    NSForegroundColorAttributeName :
-                        [NSColor colorWithWhite:0.45 alpha:1.0]
-                  }]];
   field.attributedStringValue = as;
   [container addSubview:field];
   item.view = container;
@@ -919,6 +923,8 @@ static void buildMenu(void) {
     [menu addItem:makeHeaderItem(@"NETWORK")];
     g_delegate.netItem = makeMetricItem(@"  ", @"\u2014");
     [menu addItem:g_delegate.netItem];
+    g_delegate.rdmaItem = makeMetricItem(@"  RDMA:    ", @"\u2014");
+    [menu addItem:g_delegate.rdmaItem];
     [menu addItem:[NSMenuItem separatorItem]];
 
     // --- Disk ---
@@ -1062,6 +1068,13 @@ static void buildMenu(void) {
     [menu addItem:[NSMenuItem separatorItem]];
 
     // --- Actions ---
+    NSMenuItem *ghItem =
+        [[NSMenuItem alloc] initWithTitle:@"Open GitHub Info\u2026"
+                                   action:@selector(openGitHub:)
+                            keyEquivalent:@""];
+    ghItem.target = g_delegate;
+    [menu addItem:ghItem];
+
     NSMenuItem *tuiItem =
         [[NSMenuItem alloc] initWithTitle:@"Open mactop TUI\u2026"
                                    action:@selector(openTUI:)

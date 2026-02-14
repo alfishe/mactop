@@ -181,6 +181,7 @@ func collectMetrics(done chan struct{}, cpumetricsChan chan CPUMetrics, gpumetri
 		m := sampleSocMetrics(sampleDuration / 2)
 
 		thermalStr, throttled := getThermalStateString()
+		rdmaStat := CheckRDMAAvailable().Status
 
 		componentSum := m.TotalPower
 		totalPower := componentSum
@@ -250,7 +251,7 @@ func collectMetrics(done chan struct{}, cpumetricsChan chan CPUMetrics, gpumetri
 
 		// Push to menubar worker
 		if menubar {
-			pushMenuBarMetricsToWorker(m, cpuMetrics, gpuMetrics, getNetDiskMetrics(), sysInfo, maxFP32TFLOPs, cpuPercent, thermalStr)
+			pushMenuBarMetricsToWorker(m, cpuMetrics, gpuMetrics, getNetDiskMetrics(), sysInfo, maxFP32TFLOPs, cpuPercent, thermalStr, rdmaStat)
 		}
 
 		elapsed := time.Since(start)

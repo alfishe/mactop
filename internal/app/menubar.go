@@ -38,6 +38,7 @@ typedef struct {
     double disk_read_kb_per_sec;
     double disk_write_kb_per_sec;
     double tflops_fp32;
+    char rdma_status[64];
 } menubar_metrics_t;
 
 typedef struct {
@@ -84,6 +85,7 @@ type MenuBarMetricsPayload struct {
 	TFLOPs         float64        `json:"tflops"`
 	CPUPercent     float64        `json:"cpu_percent"`
 	ThermalState   string         `json:"thermal_state"`
+	RDMAStatus     string         `json:"rdma_status"`
 }
 
 // Cached values for TUI+menubar dual mode
@@ -228,12 +230,6 @@ func updateMenuBarFromPayload(p MenuBarMetricsPayload) {
 	cm.cpu_percent = C.double(p.CPUPercent)
 	cm.gpu_percent = C.double(p.GPUMetrics.ActivePercent)
 
-	// Memory calculations
-	// memUsage := 0.0
-	// if p.MemMetrics.Total > 0 {
-	// 	memUsage = float64(p.MemMetrics.Used) / float64(p.MemMetrics.Total) * 100.0
-	// }
-
 	cm.mem_used_bytes = C.ulonglong(p.MemMetrics.Used)
 	cm.mem_total_bytes = C.ulonglong(p.MemMetrics.Total)
 	cm.swap_used_bytes = C.ulonglong(p.MemMetrics.SwapUsed)
@@ -290,6 +286,16 @@ func updateMenuBarFromPayload(p MenuBarMetricsPayload) {
 	}
 	cm.thermal_state[len(thermalBytes)] = 0
 
+	// RDMA Status
+	rdmaBytes := []byte(p.RDMAStatus)
+	if len(rdmaBytes) > 63 {
+		rdmaBytes = rdmaBytes[:63]
+	}
+	for i, b := range rdmaBytes {
+		cm.rdma_status[i] = C.char(b)
+	}
+	cm.rdma_status[len(rdmaBytes)] = 0
+
 	C.updateMenuBarMetrics((*C.menubar_metrics_t)(unsafe.Pointer(&cm)))
 }
 
@@ -301,8 +307,6 @@ func startMenuBarProcess() error {
 	}
 
 	cmd := exec.Command(exe, "--menubar-worker")
-	// cmd.Stdout = os.Stdout // Uncomment for debugging
-	// cmd.Stderr = os.Stderr
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -326,7 +330,7 @@ func startMenuBarProcess() error {
 }
 
 // pushMenuBarMetricsToWorker sends metrics to the child process.
-func pushMenuBarMetricsToWorker(sm SocMetrics, cpuMetrics CPUMetrics, gpuMetrics GPUMetrics, netDisk NetDiskMetrics, sysInfo SystemInfo, maxFP32TFLOPs float64, cpuPercent float64, thermalState string) {
+func pushMenuBarMetricsToWorker(sm SocMetrics, cpuMetrics CPUMetrics, gpuMetrics GPUMetrics, netDisk NetDiskMetrics, sysInfo SystemInfo, maxFP32TFLOPs float64, cpuPercent float64, thermalState string, rdmaStatus string) {
 	if menubarMetricsEncoder == nil {
 		return
 	}
@@ -340,9 +344,10 @@ func pushMenuBarMetricsToWorker(sm SocMetrics, cpuMetrics CPUMetrics, gpuMetrics
 		TFLOPs:         maxFP32TFLOPs,
 		CPUPercent:     cpuPercent,
 		ThermalState:   thermalState,
+		RDMAStatus:     rdmaStatus,
 	}
 
 	if err := menubarMetricsEncoder.Encode(payload); err != nil {
-		// Worker likely died, ignore or log
+		// Worker likely died, ignore
 	}
 }
