@@ -113,6 +113,12 @@ var (
 	infoScrollOffset int
 	helpScrollOffset int
 	currentBgIndex   int // Index for background color cycling
+
+	// Network link info cache (refreshed every 5 seconds)
+	cachedEthernetLinkInfo []EthernetLinkInfo
+	cachedWiFiLinkInfo     *WiFiLinkInfo
+	linkInfoLastUpdate     time.Time
+	linkInfoMutex          sync.RWMutex
 )
 
 var (

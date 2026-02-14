@@ -36,23 +36,28 @@ func resolveProcessThemeColor() (string, string) {
 		themeColorStr = getThemeColorName(themeColor)
 	}
 
-	// Determine selected header foreground color (text on colored background)
-	selectedHeaderFg := "#ffffff" // Default to white for most themes
+	return themeColorStr, resolveSelectedHeaderFg(themeColorStr)
+}
+
+// resolveSelectedHeaderFg determines the foreground color for selected headers
+// based on the theme color, ensuring good contrast.
+func resolveSelectedHeaderFg(themeColorStr string) string {
 	if themeColorStr == "black" || themeColorStr == "#000000" || themeColorStr == "#020202" {
-		selectedHeaderFg = "#ffffff"
-	} else if IsLightMode {
-		selectedHeaderFg = "#020202"
-	} else if IsCatppuccinTheme(currentConfig.Theme) {
-		selectedHeaderFg = GetCatppuccinHex(currentConfig.Theme, "Base")
-	} else if IsHexColor(themeColorStr) && IsLightHexColor(themeColorStr) {
-		// Bright hex colors need dark text for contrast
-		selectedHeaderFg = "#020202"
-	} else if isLightNamedTheme(currentConfig.Theme) {
-		// Bright named colors need dark text for contrast
-		selectedHeaderFg = "#020202"
+		return "#ffffff"
 	}
-	// For dark hex colors, white text looks best
-	return themeColorStr, selectedHeaderFg
+	if IsLightMode {
+		return "#020202"
+	}
+	if IsCatppuccinTheme(currentConfig.Theme) {
+		return GetCatppuccinHex(currentConfig.Theme, "Base")
+	}
+	if IsHexColor(themeColorStr) && IsLightHexColor(themeColorStr) {
+		return "#020202"
+	}
+	if isLightNamedTheme(currentConfig.Theme) {
+		return "#020202"
+	}
+	return "#ffffff"
 }
 
 func getProcessListTitle() (string, ui.Style) {

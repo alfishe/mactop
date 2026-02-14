@@ -1012,10 +1012,47 @@ func updateGPUUI(gpuMetrics GPUMetrics) {
 func updateNetDiskUI(netdiskMetrics NetDiskMetrics) {
 	var sb strings.Builder
 
+	// Get cached link info (refreshed every 5 seconds)
+	linkInfoMutex.RLock()
+	needsRefresh := time.Since(linkInfoLastUpdate) >= 5*time.Second
+	ethInfo := cachedEthernetLinkInfo
+	wifiInfo := cachedWiFiLinkInfo
+	linkInfoMutex.RUnlock()
+
+	if needsRefresh {
+		linkInfoMutex.Lock()
+		// Double-check after acquiring write lock
+		if time.Since(linkInfoLastUpdate) >= 5*time.Second {
+			cachedEthernetLinkInfo = GetEthernetLinkInfo()
+			cachedWiFiLinkInfo = GetWiFiLinkInfo()
+			linkInfoLastUpdate = time.Now()
+		}
+		ethInfo = cachedEthernetLinkInfo
+		wifiInfo = cachedWiFiLinkInfo
+		linkInfoMutex.Unlock()
+	}
+
 	// Network metrics are in Bytes/sec
 	netOut := formatBytes(netdiskMetrics.OutBytesPerSec, networkUnit)
 	netIn := formatBytes(netdiskMetrics.InBytesPerSec, networkUnit)
-	fmt.Fprintf(&sb, "Net: ↑ %s/s ↓ %s/s\n", netOut, netIn)
+
+	// Build network line with link speed info
+	linkInfo := ""
+	if len(ethInfo) > 0 && ethInfo[0].LinkUp {
+		linkInfo = FormatLinkSpeed(ethInfo[0].LinkSpeedMbps)
+	} else if wifiInfo != nil && wifiInfo.IsConnected {
+		if wifiInfo.WiFiGeneration != "" {
+			linkInfo = fmt.Sprintf("%s", wifiInfo.WiFiGeneration)
+		} else {
+			linkInfo = fmt.Sprintf("%dMbps", wifiInfo.TxRateMbps)
+		}
+	}
+
+	if linkInfo != "" {
+		fmt.Fprintf(&sb, "Net (%s): ↑ %s/s ↓ %s/s\n", linkInfo, netOut, netIn)
+	} else {
+		fmt.Fprintf(&sb, "Net: ↑ %s/s ↓ %s/s\n", netOut, netIn)
+	}
 
 	// Disk metrics are in KB/s, convert to Bytes for formatBytes
 	diskRead := formatBytes(netdiskMetrics.ReadKBytesPerSec*1024, diskUnit)
