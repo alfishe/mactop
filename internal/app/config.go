@@ -26,6 +26,22 @@ type CustomThemeConfig struct {
 	SystemInfo  string `json:"systemInfo,omitempty"`  // Apple Silicon system info box color
 }
 
+// MenuBarConfig controls the appearance of the --menubar status item
+type MenuBarConfig struct {
+	StatusBarWidth  int    `json:"status_bar_width,omitempty"` // Width of each bar in status bar (px, default: 24)
+	SparklineWidth  int    `json:"sparkline_width,omitempty"`  // Width of sparkline graphs in dropdown (px, default: 300)
+	SparklineHeight int    `json:"sparkline_height,omitempty"` // Height of sparkline graphs in dropdown (px, default: 40)
+	ShowCPU         *bool  `json:"show_cpu,omitempty"`         // Show CPU bar in status bar (default: true)
+	ShowGPU         *bool  `json:"show_gpu,omitempty"`         // Show GPU bar in status bar (default: true)
+	ShowANE         *bool  `json:"show_ane,omitempty"`         // Show ANE bar in status bar (default: true)
+	ShowMemory      *bool  `json:"show_memory,omitempty"`      // Show Memory bar in status bar (default: true)
+	ShowPower       *bool  `json:"show_power,omitempty"`       // Show power watts text (default: true)
+	CPUColor        string `json:"cpu_color,omitempty"`        // Hex color for CPU bar (default: systemGreen)
+	GPUColor        string `json:"gpu_color,omitempty"`        // Hex color for GPU bar (default: systemCyan)
+	ANEColor        string `json:"ane_color,omitempty"`        // Hex color for ANE bar (default: systemPurple)
+	MemColor        string `json:"mem_color,omitempty"`        // Hex color for Memory bar (default: systemOrange)
+}
+
 type AppConfig struct {
 	DefaultLayout string             `json:"default_layout"`
 	Theme         string             `json:"theme"`
@@ -33,6 +49,44 @@ type AppConfig struct {
 	SortColumn    *int               `json:"sort_column,omitempty"`
 	SortReverse   bool               `json:"sort_reverse"`
 	CustomTheme   *CustomThemeConfig `json:"custom_theme,omitempty"`
+	MenuBar       *MenuBarConfig     `json:"menubar,omitempty"`
+}
+
+// loadMenuBarConfig returns the menu bar config with defaults applied
+func loadMenuBarConfig() MenuBarConfig {
+	cfg := MenuBarConfig{
+		StatusBarWidth:  24,
+		SparklineWidth:  300,
+		SparklineHeight: 40,
+	}
+	if currentConfig.MenuBar != nil {
+		m := currentConfig.MenuBar
+		if m.StatusBarWidth > 0 {
+			cfg.StatusBarWidth = m.StatusBarWidth
+		}
+		if m.SparklineWidth > 0 {
+			cfg.SparklineWidth = m.SparklineWidth
+		}
+		if m.SparklineHeight > 0 {
+			cfg.SparklineHeight = m.SparklineHeight
+		}
+		if m.ShowCPU != nil {
+			cfg.ShowCPU = m.ShowCPU
+		}
+		if m.ShowGPU != nil {
+			cfg.ShowGPU = m.ShowGPU
+		}
+		if m.ShowANE != nil {
+			cfg.ShowANE = m.ShowANE
+		}
+		if m.ShowMemory != nil {
+			cfg.ShowMemory = m.ShowMemory
+		}
+		if m.ShowPower != nil {
+			cfg.ShowPower = m.ShowPower
+		}
+	}
+	return cfg
 }
 
 var currentConfig AppConfig

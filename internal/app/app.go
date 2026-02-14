@@ -20,7 +20,10 @@ import (
 	w "github.com/metaspartan/gotui/v5/widgets"
 )
 
-var renderMutex sync.Mutex
+var (
+	renderMutex   sync.Mutex
+	menubarWorker bool // Hidden flag for the worker process
+)
 
 func setupUI() {
 	appleSiliconModel := getSOCInfo()
@@ -299,7 +302,8 @@ func updateHelpText() {
 			"--unit-disk: Disk unit: auto, byte, kb, mb, gb (default: auto)\n"+
 			"--unit-temp: Temperature unit: celsius, fahrenheit (default: celsius)\n"+
 			"--foreground: Set the UI foreground color (named or hex, e.g., green, #9580FF)\n"+
-			"--bg: Set the UI background color (named or hex, e.g., mocha-base, #22212C)\n\n"+
+			"--bg: Set the UI background color (named or hex, e.g., mocha-base, #22212C)\n"+
+			"--menubar: Run as a macOS menu bar status item (no TUI)\n\n"+
 			"Theme File: Create ~/.mactop/theme.json for custom colors:\n"+
 			"{\"foreground\": \"#9580FF\", \"background\": \"#22212C\"}\n\n",
 		prometheusStatus,
@@ -497,6 +501,22 @@ func initializeTheme(colorName string, setColor bool, interval int, setInterval 
 	currentColorName = currentConfig.Theme
 }
 
+// runAlternateMode checks for non-TUI modes and runs them.
+// Returns true if an alternate mode was handled (caller should return).
+// runAlternateMode checks for non-TUI modes and runs them.
+// Returns true if an alternate mode was handled (caller should return).
+func runAlternateMode() bool {
+	if menubarWorker {
+		startMenuBarWorker()
+		return true
+	}
+	if headless {
+		runHeadless(headlessCount)
+		return true
+	}
+	return false
+}
+
 func Run() {
 	colorName, interval, setColor, setInterval := handleLegacyFlags()
 
@@ -522,6 +542,8 @@ func Run() {
 	flag.StringVar(&networkUnit, "unit-network", "auto", "Network unit: auto, byte, kb, mb, gb")
 	flag.StringVar(&diskUnit, "unit-disk", "auto", "Disk unit: auto, byte, kb, mb, gb")
 	flag.StringVar(&tempUnit, "unit-temp", "celsius", "Temperature unit: celsius, fahrenheit")
+	flag.BoolVar(&menubar, "menubar", false, "Run as a macOS menu bar status item (no TUI)")
+	flag.BoolVar(&menubarWorker, "menubar-worker", false, "Internal: Run as menu bar worker process")
 
 	loadConfig()
 
@@ -535,8 +557,7 @@ func Run() {
 
 	currentUser = os.Getenv("USER")
 
-	if headless {
-		runHeadless(headlessCount)
+	if runAlternateMode() {
 		return
 	}
 
@@ -613,6 +634,13 @@ func Run() {
 
 	triggerProcessCollectionChan := make(chan struct{}, 1)
 
+	// In multi-process mode, we spawn the worker here if --menubar is set on the parent
+	if menubar {
+		if err := startMenuBarProcess(); err != nil {
+			stderrLogger.Printf("Failed to start menubar worker: %v\n", err)
+		}
+	}
+
 	go collectMetrics(done, cpuMetricsChan, gpuMetricsChan, tbNetStatsChan, triggerProcessCollectionChan)
 	go collectProcessMetrics(done, processMetricsChan, triggerProcessCollectionChan)
 	go collectNetDiskMetrics(done, netdiskMetricsChan)
@@ -630,6 +658,15 @@ func Run() {
 	}()
 	lastUpdateTime = time.Now()
 
+	runEventLoop(done, uiEvents)
+}
+
+// runEventLoop dispatches the event loop.
+// When --menubar is active, the menu bar is already initialized (in Run())
+// and metrics are pushed to it from collectMetrics via pushMenuBarMetricsFromTUI.
+// We do NOT pump AppKit events here — dispatch_async in updateMenuBarMetrics
+// is sufficient for the menu bar title to update.
+func runEventLoop(done chan struct{}, uiEvents <-chan ui.Event) {
 	handleEvents(done, uiEvents)
 }
 

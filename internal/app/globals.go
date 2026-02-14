@@ -65,6 +65,7 @@ var (
 	headlessPretty bool
 	headlessCount  int
 	headlessFormat string
+	menubar        bool   // Run as menu bar status item
 	cliBgColor     string // Background color from --bg flag
 	interruptChan  = make(chan struct{}, 10)
 

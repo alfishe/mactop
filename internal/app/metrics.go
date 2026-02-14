@@ -162,6 +162,14 @@ func collectNetDiskMetrics(done chan struct{}, netdiskMetricsChan chan NetDiskMe
 }
 
 func collectMetrics(done chan struct{}, cpumetricsChan chan CPUMetrics, gpumetricsChan chan GPUMetrics, tbNetStatsChan chan []ThunderboltNetStats, triggerProcessCollectionChan chan struct{}) {
+	// Pre-calculate static info
+	sysInfo := getSOCInfo()
+	maxGPUFreq := GetMaxGPUFrequency()
+	var maxFP32TFLOPs float64
+	if maxGPUFreq > 0 && sysInfo.GPUCoreCount > 0 {
+		maxFP32TFLOPs = float64(sysInfo.GPUCoreCount) * float64(maxGPUFreq) * 0.000256
+	}
+
 	for {
 		start := time.Now()
 
@@ -172,7 +180,7 @@ func collectMetrics(done chan struct{}, cpumetricsChan chan CPUMetrics, gpumetri
 
 		m := sampleSocMetrics(sampleDuration / 2)
 
-		_, throttled := getThermalStateString()
+		thermalStr, throttled := getThermalStateString()
 
 		componentSum := m.TotalPower
 		totalPower := componentSum
@@ -227,6 +235,22 @@ func collectMetrics(done chan struct{}, cpumetricsChan chan CPUMetrics, gpumetri
 		select {
 		case triggerProcessCollectionChan <- struct{}{}:
 		default:
+		}
+
+		// Calculate CPU percent for menubar
+		var cpuPercent float64
+		percentages, err := GetCPUPercentages()
+		if err == nil && len(percentages) > 0 {
+			var total float64
+			for _, p := range percentages {
+				total += p
+			}
+			cpuPercent = total / float64(len(percentages))
+		}
+
+		// Push to menubar worker
+		if menubar {
+			pushMenuBarMetricsToWorker(m, cpuMetrics, gpuMetrics, getNetDiskMetrics(), sysInfo, maxFP32TFLOPs, cpuPercent, thermalStr)
 		}
 
 		elapsed := time.Since(start)
