@@ -22,8 +22,10 @@ type CustomThemeConfig struct {
 	Power       string `json:"power,omitempty"`       // Power chart box color (also affects power sparkline, history)
 	Thunderbolt string `json:"thunderbolt,omitempty"` // Thunderbolt/RDMA box color
 
-	ProcessList string `json:"processList,omitempty"` // Process list color
-	SystemInfo  string `json:"systemInfo,omitempty"`  // Apple Silicon system info box color
+	ProcessList         string `json:"processList,omitempty"`         // Process list color
+	ProcessListDim      string `json:"processListDim,omitempty"`      // Non-current-user process text color (default: grey)
+	ProcessListSelected string `json:"processListSelected,omitempty"` // Selected row foreground color (default: auto contrast)
+	SystemInfo          string `json:"systemInfo,omitempty"`          // Apple Silicon system info box color
 }
 
 // MenuBarConfig controls the appearance of the --menubar status item

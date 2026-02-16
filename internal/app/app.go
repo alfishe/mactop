@@ -503,8 +503,6 @@ func initializeTheme(colorName string, setColor bool, interval int, setInterval 
 
 // runAlternateMode checks for non-TUI modes and runs them.
 // Returns true if an alternate mode was handled (caller should return).
-// runAlternateMode checks for non-TUI modes and runs them.
-// Returns true if an alternate mode was handled (caller should return).
 func runAlternateMode() bool {
 	if menubarWorker {
 		startMenuBarWorker()

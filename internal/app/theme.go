@@ -128,21 +128,7 @@ func IsCatppuccinTheme(theme string) bool {
 	return slices.Contains(catppuccinThemes, theme)
 }
 
-func getCPUColor() ui.Color {
-	return ui.ColorGreen
-}
-
-func getGPUColor() ui.Color {
-	return ui.ColorMagenta
-}
-
-func getMemoryColor() ui.Color {
-	return ui.ColorBlue
-}
-
-func getANEColor() ui.Color {
-	return ui.ColorRed
-}
+// 1977 theme uses fixed per-component gauge colors regardless of cycle position
 
 // --- Style helpers: centralize the repeated 3-5 line styling patterns ---
 
@@ -182,6 +168,7 @@ func styleSparklineGroup(g *w.SparklineGroup, color ui.Color) {
 		return
 	}
 	g.BorderStyle.Fg = color
+	g.BorderStyle.Bg = CurrentBgColor
 	g.TitleStyle.Fg = color
 	g.TitleStyle.Bg = CurrentBgColor
 }
@@ -198,10 +185,10 @@ func styleStepChart(sc *w.StepChart, color ui.Color) {
 }
 
 func update1977GaugeColors() {
-	styleGauge(cpuGauge, getCPUColor(), SecondaryTextColor)
-	styleGauge(gpuGauge, getGPUColor(), SecondaryTextColor)
-	styleGauge(memoryGauge, getMemoryColor(), SecondaryTextColor)
-	styleGauge(aneGauge, getANEColor(), SecondaryTextColor)
+	styleGauge(cpuGauge, ui.ColorGreen, SecondaryTextColor)
+	styleGauge(gpuGauge, ui.ColorMagenta, SecondaryTextColor)
+	styleGauge(memoryGauge, ui.ColorBlue, SecondaryTextColor)
+	styleGauge(aneGauge, ui.ColorRed, SecondaryTextColor)
 }
 
 func applyThemeToGauges(color ui.Color) {
@@ -263,6 +250,7 @@ func applyCustomWidgetColors(theme *CustomThemeConfig, fgColor ui.Color) {
 	styleParagraph(NetworkInfo, netColor)
 	styleParagraph(tbInfoParagraph, resolveCustomColor(theme.Thunderbolt, fgColor))
 	styleParagraph(infoParagraph, fgColor) // info box uses foreground directly
+	styleParagraph(helpText, fgColor)
 	styleParagraph(modelText, resolveCustomColor(theme.SystemInfo, fgColor))
 
 	// Process list (needs special selected-style contrast logic)
@@ -273,12 +261,18 @@ func applyCustomWidgetColors(theme *CustomThemeConfig, fgColor ui.Color) {
 		processList.TextStyle = ui.NewStyle(color, CurrentBgColor)
 
 		selectedFg := ui.NewRGBColor(2, 2, 2)
-		colorForContrast := theme.ProcessList
-		if colorForContrast == "" || !IsHexColor(colorForContrast) {
-			colorForContrast = theme.Foreground
-		}
-		if !IsLightHexColor(colorForContrast) {
-			selectedFg = ui.ColorWhite
+		if theme.ProcessListSelected != "" && IsHexColor(theme.ProcessListSelected) {
+			if parsed, err := ParseHexColor(theme.ProcessListSelected); err == nil {
+				selectedFg = parsed
+			}
+		} else {
+			colorForContrast := theme.ProcessList
+			if colorForContrast == "" || !IsHexColor(colorForContrast) {
+				colorForContrast = theme.Foreground
+			}
+			if !IsLightHexColor(colorForContrast) {
+				selectedFg = ui.ColorWhite
+			}
 		}
 		processList.SelectedStyle = ui.NewStyle(selectedFg, color)
 	}
@@ -550,6 +544,11 @@ func GetProcessTextColor(isCurrentUser bool) string {
 		return resolveThemeColorString(currentConfig.Theme)
 	}
 	// Non-current user processes
+	if currentConfig.CustomTheme != nil && currentConfig.CustomTheme.ProcessListDim != "" {
+		if IsHexColor(currentConfig.CustomTheme.ProcessListDim) {
+			return currentConfig.CustomTheme.ProcessListDim
+		}
+	}
 	if IsLightMode {
 		return "240"
 	}
@@ -572,8 +571,6 @@ func cycleTheme() {
 	currentConfig.CustomTheme = nil
 
 	applyTheme(themeOrder[nextIndex], IsLightMode)
-
-	currentConfig.Theme = currentColorName
 	saveConfig()
 
 	updateInfoUI()
