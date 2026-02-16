@@ -732,6 +732,14 @@ func GetCurrentBgName() string {
 	return "clear"
 }
 
+// hasCustomComponentColors returns true if any per-component color is specified.
+func hasCustomComponentColors(t *CustomThemeConfig) bool {
+	return t.CPU != "" || t.GPU != "" || t.Memory != "" || t.ANE != "" ||
+		t.Network != "" || t.Power != "" || t.Thunderbolt != "" ||
+		t.ProcessList != "" || t.ProcessListDim != "" ||
+		t.ProcessListSelected != "" || t.SystemInfo != ""
+}
+
 // applyCustomThemeFile loads and applies custom theme from ~/.mactop/theme.json
 // Returns (appliedForeground, appliedBackground) to indicate which colors were set
 func applyCustomThemeFile() (bool, bool) {
@@ -758,9 +766,7 @@ func applyCustomThemeFile() (bool, bool) {
 		appliedFg = true
 
 		// Apply per-component colors if any are specified
-		if theme.CPU != "" || theme.GPU != "" || theme.Memory != "" || theme.ANE != "" ||
-			theme.Network != "" || theme.Power != "" || theme.Thunderbolt != "" ||
-			theme.ProcessList != "" || theme.SystemInfo != "" {
+		if hasCustomComponentColors(theme) {
 			foregroundColor, _ := ParseHexColor(theme.Foreground)
 			applyCustomPerComponentColors(theme, foregroundColor)
 		}

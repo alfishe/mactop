@@ -146,6 +146,7 @@ mactop --headless --format toon
 - `--unit-disk`: Disk unit: auto, byte, kb, mb, gb (default: auto)
 - `--unit-temp`: Temperature unit: celsius, fahrenheit (default: celsius)
 - `--test` or `-t`: Test IOReport power metrics (no sudo required)
+- `--menubar`: Run as a macOS menu bar status item alongside the TUI.
 - `--version` or `-v`: Print the version of mactop.
 - `--help` or `-h`: Show a help message about these flags and how to run mactop.
 
@@ -153,7 +154,8 @@ mactop --headless --format toon
 
 Create `~/.mactop/theme.json` to customize colors:
 
-#### Basic Colors
+### Basic Colors
+
 ```json
 {
   "foreground": "#9580FF",
@@ -161,7 +163,7 @@ Create `~/.mactop/theme.json` to customize colors:
 }
 ```
 
-#### Per-Component Colors (Optional)
+### Per-Component Colors (Optional)
 
 Individual component colors that override the foreground:
 
@@ -172,10 +174,13 @@ Individual component colors that override the foreground:
 - `network`: Network box, Network sparklines
 - `power`: Power box, Power sparkline, Power history chart
 - `thunderbolt`: Thunderbolt/RDMA box
-- `processList`: Process list color
+- `processList`: Process list border and text color
+- `processListDim`: Non-current-user (root/system) process text color (default: grey)
+- `processListSelected`: Selected row foreground text color (default: auto contrast)
 - `systemInfo`: System info box color
 
-#### Example: Colorful Theme
+### Example: Colorful Theme
+
 ```json
 {
   "foreground": "#B0BEC5",
@@ -188,22 +193,24 @@ Individual component colors that override the foreground:
   "power": "#FF6E40",
   "thunderbolt": "#E91E63",
   "processList": "#FFEB3B",
+  "processListDim": "#555555",
+  "processListSelected": "#FFFFFF",
   "systemInfo": "#00BCD4"
 }
 ```
 
-**Example: Dracula PRO Palette**
+### Example: Dracula PRO Palette
 
-| Element | Hex |
-|---------|-----|
+| Element    | Hex       |
+|------------|-----------|
 | Background | `#22212C` |
 | Foreground | `#F8F8F2` |
-| Purple | `#9580FF` |
-| Cyan | `#80FFEA` |
-| Green | `#8AFF80` |
-| Pink | `#FF80BF` |
-| Orange | `#FFCA80` |
-| Red | `#FF9580` |
+| Purple     | `#9580FF` |
+| Cyan       | `#80FFEA` |
+| Green      | `#8AFF80` |
+| Pink       | `#FF80BF` |
+| Orange     | `#FFCA80` |
+| Red        | `#FF9580` |
 
 Priority order: CLI flags > theme.json > saved config.
 
