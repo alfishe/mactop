@@ -56,7 +56,7 @@ func formatTime(seconds float64) string {
 	minutes := (int(seconds) / 60) % 60
 	secs := int(seconds) % 60
 
-	return fmt.Sprintf("%dd%02d:%02d:%02d", days, hours, minutes, secs)
+	return fmt.Sprintf("%02dd%02dh%02dm%02ds", days, hours, minutes, secs)
 }
 
 func formatMemorySize(kb int64) string {
