@@ -113,6 +113,14 @@ func initSocMetrics() error {
 
 func sampleSocMetrics(durationMs int) SocMetrics {
 	pm := C.samplePowerMetrics(C.int(durationMs))
+
+	var dramReadBW, dramWriteBW, dramBWCombined float64
+	if durationMs > 0 {
+		dramReadBW = float64(pm.dramReadBytes) / float64(durationMs) * 1000.0 / 1e9
+		dramWriteBW = float64(pm.dramWriteBytes) / float64(durationMs) * 1000.0 / 1e9
+		dramBWCombined = float64(pm.dramReadBytes+pm.dramWriteBytes) / float64(durationMs) * 1000.0 / 1e9
+	}
+
 	return SocMetrics{
 		CPUPower:        float64(pm.cpuPower),
 		GPUPower:        float64(pm.gpuPower),
@@ -130,9 +138,9 @@ func sampleSocMetrics(durationMs int) SocMetrics {
 		SocTemp:         float32(pm.socTemp),
 		CPUTemp:         float32(pm.cpuTemp),
 		GPUTemp:         float32(pm.gpuTemp),
-		DRAMReadBW:      float64(pm.dramReadBytes) / float64(durationMs) * 1000.0 / 1e9,
-		DRAMWriteBW:     float64(pm.dramWriteBytes) / float64(durationMs) * 1000.0 / 1e9,
-		DRAMBWCombined:  float64(pm.dramReadBytes+pm.dramWriteBytes) / float64(durationMs) * 1000.0 / 1e9,
+		DRAMReadBW:      dramReadBW,
+		DRAMWriteBW:     dramWriteBW,
+		DRAMBWCombined:  dramBWCombined,
 	}
 }
 
