@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -27,6 +28,8 @@ func startPrometheusServer(port string) {
 	registry.MustRegister(rdmaAvailable)
 	registry.MustRegister(cpuCoreUsage)
 	registry.MustRegister(systemInfoGauge)
+	registry.MustRegister(fanRPM)
+	registry.MustRegister(tempSensorGauge)
 
 	handler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
 
@@ -245,9 +248,13 @@ func collectMetrics(done chan struct{}, cpumetricsChan chan CPUMetrics, gpumetri
 			PClusterActive:  int(m.PClusterActive),
 			EClusterFreqMHz: int(m.EClusterFreqMHz),
 			PClusterFreqMHz: int(m.PClusterFreqMHz),
+			SClusterActive:  int(m.SClusterActive),
+			SClusterFreqMHz: int(m.SClusterFreqMHz),
 			DRAMReadBW:      m.DRAMReadBW,
 			DRAMWriteBW:     m.DRAMWriteBW,
 			DRAMBWCombined:  m.DRAMBWCombined,
+			Fans:            m.Fans,
+			TempSensors:     m.TempSensors,
 		}
 
 		gpuMetrics := GPUMetrics{
@@ -255,6 +262,14 @@ func collectMetrics(done chan struct{}, cpumetricsChan chan CPUMetrics, gpumetri
 			ActivePercent: m.GPUActive,
 			Power:         m.GPUPower + m.GPUSRAMPower,
 			Temp:          m.GPUTemp,
+		}
+
+		// Update fan and temp sensor Prometheus metrics
+		for _, fan := range m.Fans {
+			fanRPM.With(prometheus.Labels{"fan_id": fmt.Sprintf("%d", fan.ID), "fan_name": fan.Name}).Set(float64(fan.ActualRPM))
+		}
+		for _, sensor := range m.TempSensors {
+			tempSensorGauge.With(prometheus.Labels{"key": sensor.Key, "name": sensor.Name}).Set(sensor.Value)
 		}
 
 		if dispatchMetrics(done, cpumetricsChan, gpumetricsChan, tbNetStatsChan, triggerProcessCollectionChan, cpuMetrics, gpuMetrics, GetThunderboltNetStats()) {

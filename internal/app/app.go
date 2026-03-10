@@ -28,9 +28,16 @@ var (
 func setupUI() {
 	appleSiliconModel := getSOCInfo()
 	modelText, helpText, infoParagraph = w.NewParagraph(), w.NewParagraph(), w.NewParagraph()
+	fanStatusPanel, fanTempPanel, fanControlPanel = w.NewParagraph(), w.NewParagraph(), w.NewParagraph()
 	modelText.Title = "Apple Silicon"
 	helpText.Title = "mactop help menu"
 	infoParagraph.Text = "Loading..."
+	fanStatusPanel.Title = " ⊚ Fans "
+	fanStatusPanel.BorderRounded = true
+	fanTempPanel.Title = " 🌡 Temperatures "
+	fanTempPanel.BorderRounded = true
+	fanControlPanel.Title = ""
+	fanControlPanel.BorderRounded = true
 	modelName := appleSiliconModel.Name
 	if modelName == "" {
 		modelName = "Unknown Model"
@@ -175,17 +182,15 @@ func setupUI() {
 	updateProcessList()
 
 	cpuCoreWidget = NewCPUCoreWidget(appleSiliconModel)
-	eCoreCount = appleSiliconModel.ECoreCount
-	pCoreCount = appleSiliconModel.PCoreCount
-	cpuCoreWidget.Title = fmt.Sprintf("%d Cores (%dE/%dP)",
-		eCoreCount+pCoreCount,
-		eCoreCount,
-		pCoreCount,
+	coreSummary := FormatCoreSummary(cpuCoreWidget.eCoreCount, cpuCoreWidget.pCoreCount, cpuCoreWidget.sCoreCount)
+	totalCPUCores := cpuCoreWidget.eCoreCount + cpuCoreWidget.pCoreCount + cpuCoreWidget.sCoreCount
+	cpuCoreWidget.Title = fmt.Sprintf("%d Cores %s",
+		totalCPUCores,
+		coreSummary,
 	)
-	cpuGauge.Title = fmt.Sprintf("%d Cores (%dE/%dP)",
-		eCoreCount+pCoreCount,
-		eCoreCount,
-		pCoreCount,
+	cpuGauge.Title = fmt.Sprintf("%d Cores %s",
+		totalCPUCores,
+		coreSummary,
 	)
 
 	confirmModal = w.NewModal("CONFIRM KILL")
@@ -214,6 +219,7 @@ func updateModelText() {
 	}
 	eCoreCount := appleSiliconModel.ECoreCount
 	pCoreCount := appleSiliconModel.PCoreCount
+	sCoreCount := appleSiliconModel.SCoreCount
 	gpuCoreCount := appleSiliconModel.GPUCoreCount
 
 	gpuCoreCountStr := "?"
@@ -221,11 +227,19 @@ func updateModelText() {
 		gpuCoreCountStr = fmt.Sprintf("%d", gpuCoreCount)
 	}
 
-	modelText.Text = fmt.Sprintf("%s\n%d Cores\n%d E-Cores\n%d P-Cores\n%s GPU Cores",
+	totalCores := eCoreCount + pCoreCount + sCoreCount
+	var coreLines string
+	if sCoreCount > 0 {
+		coreLines = fmt.Sprintf("%d Cores\n%d E-Cores\n%d P-Cores\n%d S-Cores",
+			totalCores, eCoreCount, pCoreCount, sCoreCount)
+	} else {
+		coreLines = fmt.Sprintf("%d Cores\n%d E-Cores\n%d P-Cores",
+			totalCores, eCoreCount, pCoreCount)
+	}
+
+	modelText.Text = fmt.Sprintf("%s\n%s\n%s GPU Cores",
 		modelName,
-		eCoreCount+pCoreCount,
-		eCoreCount,
-		pCoreCount,
+		coreLines,
 		gpuCoreCountStr,
 	)
 }
@@ -235,6 +249,29 @@ func updateIntervalText() {
 }
 
 func updateInfoUI() {
+	if currentConfig.DefaultLayout == LayoutFan {
+		themeColor := "green"
+		if currentConfig.Theme != "" {
+			themeColor = currentConfig.Theme
+		}
+		if IsLightMode && themeColor == "white" {
+			themeColor = "black"
+		}
+		tc := GetThemeColor(themeColor)
+
+		fanStatusPanel.Text = buildFanStatusText(themeColor)
+		fanTempPanel.Text = buildFanTempText(themeColor)
+		fanControlPanel.Text = buildFanControlText(themeColor)
+
+		for _, p := range []*w.Paragraph{fanStatusPanel, fanTempPanel, fanControlPanel} {
+			p.BorderStyle.Fg = tc
+			p.TitleStyle.Fg = tc
+		}
+		mainBlock.BorderStyle.Fg = tc
+		mainBlock.TitleStyle.Fg = tc
+		return
+	}
+
 	if currentConfig.DefaultLayout != LayoutInfo {
 		return
 	}
@@ -278,8 +315,9 @@ func updateHelpText() {
 			"- c: Cycle through UI color themes\n"+
 			"- b: Cycle through UI background colors\n"+
 			"- p: Toggle party mode (color cycling)\n"+
-			"- l: Cycle through the 17 available layouts\n"+
+			"- l: Cycle through the 18 available layouts\n"+
 			"- i: Toggle information layout\n"+
+			"- F: Toggle fan control & thermals layout\n"+
 			"- F9: Kill selected process (y/n confirm)\n"+
 			"- f: Freeze the process list\n"+
 			"- /: Search process list\n"+
@@ -304,6 +342,7 @@ func updateHelpText() {
 			"--foreground: Set the UI foreground color (named or hex, e.g., green, #9580FF)\n"+
 			"--bg: Set the UI background color (named or hex, e.g., mocha-base, #22212C)\n"+
 			"--pid: Monitor a specific process by PID (e.g., --pid 1234)\n"+
+			"--fan-control: Enable interactive fan speed control (⚠️  writes to SMC, use with caution)\n"+
 			"--menubar: Run as a macOS menu bar status item (no TUI)\n\n"+
 			"Theme File: Create ~/.mactop/theme.json for custom colors:\n"+
 			"{\"foreground\": \"#9580FF\", \"background\": \"#22212C\"}\n\n",
@@ -547,6 +586,10 @@ func seedInitialMetrics() {
 		PClusterActive:  int(m.PClusterActive),
 		EClusterFreqMHz: int(m.EClusterFreqMHz),
 		PClusterFreqMHz: int(m.PClusterFreqMHz),
+		SClusterActive:  int(m.SClusterActive),
+		SClusterFreqMHz: int(m.SClusterFreqMHz),
+		Fans:            m.Fans,
+		TempSensors:     m.TempSensors,
 	}
 	gpuMetricsChan <- GPUMetrics{
 		FreqMHz:       int(m.GPUFreqMHz),
@@ -588,6 +631,7 @@ func Run() {
 	flag.BoolVar(&menubar, "menubar", false, "Run as a macOS menu bar status item (no TUI)")
 	flag.BoolVar(&menubarWorker, "menubar-worker", false, "Internal: Run as menu bar worker process")
 	flag.IntVar(&filterPID, "pid", 0, "Monitor a specific process by PID")
+	flag.BoolVar(&fanControl, "fan-control", false, "Enable interactive fan speed control (⚠️  writes to SMC)")
 
 	loadConfig()
 
@@ -851,7 +895,7 @@ func updateMemoryHistory(memoryMetrics MemoryMetrics) {
 }
 
 func finalizeCPUUI(totalUsage float64, coreUsages []float64, cpuMetrics CPUMetrics, memoryMetrics MemoryMetrics) {
-	ecoreAvg, pcoreAvg := calculateCoreAverages(coreUsages)
+	ecoreAvg, pcoreAvg, _ := calculateCoreAverages(coreUsages)
 	updateCPUPrometheusMetrics(totalUsage, ecoreAvg, pcoreAvg, coreUsages, cpuMetrics, memoryMetrics)
 
 	// Update gauge colors with dynamic saturation if 1977 theme is active
@@ -861,21 +905,21 @@ func finalizeCPUUI(totalUsage float64, coreUsages []float64, cpuMetrics CPUMetri
 }
 
 func updateCPUGaugeTitles(totalUsage float64, cpuMetrics CPUMetrics) {
+	coreSummary := FormatCoreSummary(cpuCoreWidget.eCoreCount, cpuCoreWidget.pCoreCount, cpuCoreWidget.sCoreCount)
+	totalCPUCores := cpuCoreWidget.eCoreCount + cpuCoreWidget.pCoreCount + cpuCoreWidget.sCoreCount
 	if isCompactLayout() {
 		cpuGauge.Title = fmt.Sprintf("CPU %.0f%% %s", totalUsage, formatTemp(cpuMetrics.CPUTemp))
 	} else {
-		cpuGauge.Title = fmt.Sprintf("%d Cores (%dE/%dP) %.2f%% (%s)",
-			cpuCoreWidget.eCoreCount+cpuCoreWidget.pCoreCount,
-			cpuCoreWidget.eCoreCount,
-			cpuCoreWidget.pCoreCount,
+		cpuGauge.Title = fmt.Sprintf("%d Cores %s %.2f%% (%s)",
+			totalCPUCores,
+			coreSummary,
 			totalUsage,
 			formatTemp(cpuMetrics.CPUTemp),
 		)
 	}
-	cpuCoreWidget.Title = fmt.Sprintf("%d Cores (%dE/%dP) %.2f%% (%s)",
-		cpuCoreWidget.eCoreCount+cpuCoreWidget.pCoreCount,
-		cpuCoreWidget.eCoreCount,
-		cpuCoreWidget.pCoreCount,
+	cpuCoreWidget.Title = fmt.Sprintf("%d Cores %s %.2f%% (%s)",
+		totalCPUCores,
+		coreSummary,
 		totalUsage,
 		formatTemp(cpuMetrics.CPUTemp),
 	)
@@ -926,20 +970,30 @@ func updateMemoryGaugeTitle(memoryMetrics MemoryMetrics) {
 	}
 }
 
-func calculateCoreAverages(coreUsages []float64) (ecoreAvg, pcoreAvg float64) {
+func calculateCoreAverages(coreUsages []float64) (ecoreAvg, pcoreAvg, scoreAvg float64) {
 	if cpuCoreWidget.eCoreCount > 0 && len(coreUsages) >= cpuCoreWidget.eCoreCount {
 		for i := 0; i < cpuCoreWidget.eCoreCount; i++ {
 			ecoreAvg += coreUsages[i]
 		}
 		ecoreAvg /= float64(cpuCoreWidget.eCoreCount)
 	}
-	if cpuCoreWidget.pCoreCount > 0 && len(coreUsages) >= cpuCoreWidget.eCoreCount+cpuCoreWidget.pCoreCount {
-		for i := cpuCoreWidget.eCoreCount; i < cpuCoreWidget.eCoreCount+cpuCoreWidget.pCoreCount; i++ {
+	pStart := cpuCoreWidget.eCoreCount
+	pEnd := pStart + cpuCoreWidget.pCoreCount
+	if cpuCoreWidget.pCoreCount > 0 && len(coreUsages) >= pEnd {
+		for i := pStart; i < pEnd; i++ {
 			pcoreAvg += coreUsages[i]
 		}
 		pcoreAvg /= float64(cpuCoreWidget.pCoreCount)
 	}
-	return ecoreAvg, pcoreAvg
+	sStart := pEnd
+	sEnd := sStart + cpuCoreWidget.sCoreCount
+	if cpuCoreWidget.sCoreCount > 0 && len(coreUsages) >= sEnd {
+		for i := sStart; i < sEnd; i++ {
+			scoreAvg += coreUsages[i]
+		}
+		scoreAvg /= float64(cpuCoreWidget.sCoreCount)
+	}
+	return ecoreAvg, pcoreAvg, scoreAvg
 }
 
 func updateCPUPrometheusMetrics(totalUsage, ecoreAvg, pcoreAvg float64, coreUsages []float64, cpuMetrics CPUMetrics, memoryMetrics MemoryMetrics) {
@@ -975,10 +1029,13 @@ func updateCPUPrometheusMetrics(totalUsage, ecoreAvg, pcoreAvg float64, coreUsag
 
 	// Update per-core CPU usage metrics
 	eCoreCount := cpuCoreWidget.eCoreCount
+	pEnd := eCoreCount + cpuCoreWidget.pCoreCount
 	for i, usage := range coreUsages {
-		coreType := "p"
+		coreType := "s"
 		if i < eCoreCount {
 			coreType = "e"
+		} else if i < pEnd {
+			coreType = "p"
 		}
 		cpuCoreUsage.With(prometheus.Labels{"core": fmt.Sprintf("%d", i), "type": coreType}).Set(usage)
 	}

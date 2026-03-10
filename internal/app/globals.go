@@ -17,6 +17,7 @@ var (
 	mainBlock                                                   *ui.Block
 	modelText, PowerChart, NetworkInfo, helpText, infoParagraph *w.Paragraph
 	tbInfoParagraph                                             *w.Paragraph
+	fanStatusPanel, fanTempPanel, fanControlPanel               *w.Paragraph
 	grid                                                        *ui.Grid
 	processList                                                 *w.List
 	// Search state
@@ -68,6 +69,7 @@ var (
 	menubar        bool   // Run as menu bar status item
 	filterPID      int    // Monitor a specific process by PID (0 = all)
 	cliBgColor     string // Background color from --bg flag
+	fanControl     bool   // Enable interactive fan speed control (requires --fan-control flag)
 	interruptChan  = make(chan struct{}, 10)
 
 	cachedTermWidth    int
@@ -172,11 +174,10 @@ var (
 			Help: "Current SoC temperature in Celsius",
 		},
 	)
-	gpuTemp = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "mactop_gpu_temperature_celsius",
-		Help: "Current GPU temperature in Celsius",
-	})
-	thermalState = prometheus.NewGauge(prometheus.GaugeOpts{
+	gpuTemp         = prometheus.NewGauge(prometheus.GaugeOpts{Name: "mactop_gpu_temp_celsius", Help: "GPU temperature in Celsius"})
+	fanRPM          = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "mactop_fan_rpm", Help: "Fan speed in RPM"}, []string{"fan_id", "fan_name"})
+	tempSensorGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "mactop_temp_sensor_celsius", Help: "Temperature sensor reading in Celsius"}, []string{"key", "name"})
+	thermalState    = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "mactop_thermal_state",
 		Help: "Current thermal state (0=Nominal, 1=Fair, 2=Serious, 3=Critical)",
 	},

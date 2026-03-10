@@ -33,6 +33,8 @@ typedef struct {
     double ecluster_active;
     int pcluster_freq_mhz;
     double pcluster_active;
+    int scluster_freq_mhz;
+    double scluster_active;
     double net_in_bytes_per_sec;
     double net_out_bytes_per_sec;
     double disk_read_kb_per_sec;
@@ -287,6 +289,8 @@ func updateMenuBarFromPayload(p MenuBarMetricsPayload) {
 	cm.ecluster_freq_mhz = C.int(p.CPUMetrics.EClusterFreqMHz)
 	cm.pcluster_active = C.double(float64(p.CPUMetrics.PClusterActive))
 	cm.pcluster_freq_mhz = C.int(p.CPUMetrics.PClusterFreqMHz)
+	cm.scluster_active = C.double(float64(p.CPUMetrics.SClusterActive))
+	cm.scluster_freq_mhz = C.int(p.CPUMetrics.SClusterFreqMHz)
 
 	// Network/Disk
 	cm.net_in_bytes_per_sec = C.double(p.NetDiskMetrics.InBytesPerSec)

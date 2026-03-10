@@ -25,9 +25,10 @@ const (
 	LayoutPico            = "pico"         // Maximum density with 2x2 gauges + sparklines
 	LayoutHistory         = "history"      // StepChart history for GPU, Power, and Memory
 	LayoutHistoryFull     = "history_full" // StepChart history including CPU
+	LayoutFan             = "fan"          // Fan control and temperature sensors
 )
 
-var layoutOrder = []string{LayoutDefault, LayoutAlternative, LayoutAlternativeFull, LayoutVertical, LayoutCompact, LayoutDashboard, LayoutGaugesOnly, LayoutGPUFocus, LayoutCPUFocus, LayoutNetworkIO, LayoutSmall, LayoutTiny, LayoutMicro, LayoutNano, LayoutPico, LayoutHistory, LayoutHistoryFull}
+var layoutOrder = []string{LayoutDefault, LayoutAlternative, LayoutAlternativeFull, LayoutVertical, LayoutCompact, LayoutDashboard, LayoutGaugesOnly, LayoutGPUFocus, LayoutCPUFocus, LayoutNetworkIO, LayoutSmall, LayoutTiny, LayoutMicro, LayoutNano, LayoutPico, LayoutHistory, LayoutHistoryFull, LayoutFan}
 
 func setupGrid() {
 	totalLayouts = len(layoutOrder)
@@ -250,39 +251,12 @@ func setLayoutGrid(layoutName string) {
 		)
 	case LayoutTiny, LayoutMicro, LayoutNano, LayoutPico:
 		setCompactLayoutGrid(layoutName)
-	case LayoutInfo:
-		grid.Set(
-			ui.NewRow(1.0,
-				ui.NewCol(1.0, infoParagraph),
-			),
-		)
+	case LayoutInfo, LayoutFan:
+		setInfoFanLayoutGrid(layoutName)
 	case LayoutHistory:
-		grid.Set(
-			ui.NewRow(1.0/3,
-				ui.NewCol(1.0, gpuHistoryChart),
-			),
-			ui.NewRow(1.0/3,
-				ui.NewCol(1.0/2, powerHistoryChart),
-				ui.NewCol(1.0/2, memoryHistoryChart),
-			),
-			ui.NewRow(1.0/3,
-				ui.NewCol(1.0, processList),
-			),
-		)
+		setHistoryLayoutGrid()
 	case LayoutHistoryFull:
-		grid.Set(
-			ui.NewRow(1.0/3,
-				ui.NewCol(1.0/2, cpuHistoryChart),
-				ui.NewCol(1.0/2, gpuHistoryChart),
-			),
-			ui.NewRow(1.0/3,
-				ui.NewCol(1.0/2, powerHistoryChart),
-				ui.NewCol(1.0/2, memoryHistoryChart),
-			),
-			ui.NewRow(1.0/3,
-				ui.NewCol(1.0, processList),
-			),
-		)
+		setHistoryFullLayoutGrid()
 	default: // LayoutDefault
 		grid.Set(
 			ui.NewRow(1.0/4,
@@ -392,4 +366,55 @@ func setCompactLayoutGrid(layoutName string) {
 			),
 		)
 	}
+}
+
+func setInfoFanLayoutGrid(layoutName string) {
+	if layoutName == LayoutFan {
+		grid.Set(
+			ui.NewRow(0.92,
+				ui.NewCol(0.5, fanStatusPanel),
+				ui.NewCol(0.5, fanTempPanel),
+			),
+			ui.NewRow(0.08,
+				ui.NewCol(1.0, fanControlPanel),
+			),
+		)
+	} else {
+		grid.Set(
+			ui.NewRow(1.0,
+				ui.NewCol(1.0, infoParagraph),
+			),
+		)
+	}
+}
+
+func setHistoryLayoutGrid() {
+	grid.Set(
+		ui.NewRow(1.0/3,
+			ui.NewCol(1.0, gpuHistoryChart),
+		),
+		ui.NewRow(1.0/3,
+			ui.NewCol(1.0/2, powerHistoryChart),
+			ui.NewCol(1.0/2, memoryHistoryChart),
+		),
+		ui.NewRow(1.0/3,
+			ui.NewCol(1.0, processList),
+		),
+	)
+}
+
+func setHistoryFullLayoutGrid() {
+	grid.Set(
+		ui.NewRow(1.0/3,
+			ui.NewCol(1.0/2, cpuHistoryChart),
+			ui.NewCol(1.0/2, gpuHistoryChart),
+		),
+		ui.NewRow(1.0/3,
+			ui.NewCol(1.0/2, powerHistoryChart),
+			ui.NewCol(1.0/2, memoryHistoryChart),
+		),
+		ui.NewRow(1.0/3,
+			ui.NewCol(1.0, processList),
+		),
+	)
 }

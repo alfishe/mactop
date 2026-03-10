@@ -22,6 +22,9 @@
 - Real-time CPU, GPU, ANE, DRAM, and system power wattage usage display
 - GPU frequency and usage percentage display
 - CPU and GPU temperatures + Thermal State
+- **Comprehensive Temperature Sensors**: All available SMC temperature sensors (CPU Die, GPU, Memory, SSD, Airflow, and more) with human-readable labels
+- **Fan Monitoring**: Real-time fan RPM, target speed, mode (Auto/Manual), and visual RPM bars
+- **Fan Speed Control**: Optional interactive fan speed control via `--fan-control` flag (writes to SMC)
 - Detailed native metrics for CPU cores (E and P cores) via Apple's Mach Kernel API
 - Memory usage and swap information
 - Network usage information (upload/download speeds)
@@ -32,7 +35,7 @@
 - Proportional per process GPU usage (experimental)
 - Multiple volume display (shows Mac HD + mounted external volumes)
 - Easy-to-read terminal UI
-- **17 Layouts**: (`l` to cycle layouts)
+- **18 Layouts**: (`l` to cycle layouts)
 - **Persistent Settings**: Remembers your Layout and Theme choice across restarts
 - Customizable UI color (green, red, blue, skyblue, magenta, yellow, gold, silver, white, lime, orange, violet, pink, and more) (`c` to cycle colors)
 - Customizable background color (`b` to cycle colors)
@@ -145,6 +148,7 @@ mactop --headless --format toon
 - `--unit-network`: Network unit: auto, byte, kb, mb, gb (default: auto)
 - `--unit-disk`: Disk unit: auto, byte, kb, mb, gb (default: auto)
 - `--unit-temp`: Temperature unit: celsius, fahrenheit (default: celsius)
+- `--fan-control`: Enable interactive fan speed control (**⚠️ writes to SMC** — use with caution, may require sudo on some macOS versions)
 - `--test` or `-t`: Test IOReport power metrics (no sudo required)
 - `--menubar`: Run as a macOS menu bar status item alongside the TUI.
 - `--version` or `-v`: Print the version of mactop.
@@ -224,7 +228,8 @@ Use the following keys to interact with the application while its running:
 - `b`: Cycle through the background colors.
 - `p`: Party Mode (Randomly cycles through colors)
 - `i`: Toggle Info layout (displays system info)
-- `l`: Cycle through the 17 available layouts.
+- `F` (Shift+f): Toggle Fan & Thermals layout (fan monitoring + all temperature sensors)
+- `l`: Cycle through the 18 available layouts.
 - `+` or `=`: Increase update interval (slower updates).
 - `-`: Decrease update interval (faster updates).
 - `F9`: Kill the currently selected process (pauses updates while selecting).
@@ -233,6 +238,15 @@ Use the following keys to interact with the application while its running:
 - `/`: Search/Filter the process list by name (Esc to clear).
 - `Enter` or `Space`: Sort by the selected column.
 - `h` or `?`: Toggle the help menu.
+
+### Fan Control Keys (requires `--fan-control` flag, only active in Fan layout)
+
+- `+` or `=`: Increase fan speed (+100 RPM)
+- `-`: Decrease fan speed (-100 RPM)
+- `a`: Toggle auto/manual fan mode
+- `0`: Set all fans to minimum speed
+- `9`: Set all fans to maximum speed
+- `R` (Shift+r): Reset all fans to automatic control
 
 ## Example Theme (Green) Screenshot (mactop -c green) on Advanced layout (Hit "l" key to toggle)
 
@@ -480,7 +494,7 @@ Contributions are what make the open-source community such an amazing place to l
 
 ## What does mactop use to get real-time data?
 
-- **Apple SMC**: For SoC temperature sensors and System Power (PSTR)
+- **Apple SMC**: For SoC temperature sensors, System Power (PSTR), fan speed monitoring (FNum, F*Ac/Mn/Mx/Tg/Md), fan speed control via SMCWrite, and comprehensive temperature sensor enumeration
 - **IOReport API**: For CPU, GPU, ANE, and DRAM power consumption (no sudo required)
 - **IOKit**: For GPU frequency table from `pmgr` device
 - **IOHIDEventSystemClient**: Fallback for SoC temperature sensors

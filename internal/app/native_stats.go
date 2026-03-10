@@ -288,10 +288,10 @@ int get_disk_stats(disk_stat_t *stats, int max_stats) {
     return count;
 }
 
-// CoreType: 0 = unknown, 1 = E-core, 2 = P-core
+// CoreType: 0 = unknown, 1 = E-core, 2 = P-core, 3 = S-core (Super)
 typedef struct {
     int cpu_id;
-    int core_type;  // 0=unknown, 1=E, 2=P
+    int core_type;  // 0=unknown, 1=E, 2=P, 3=S
 } core_info_t;
 
 // Get core topology from IORegistry - works on all M-series chips
@@ -332,6 +332,8 @@ int get_core_topology(core_info_t *cores, int max_cores) {
                             cores[count].core_type = 1; // E-core
                         } else if (cluster_type && cluster_type[0] == 'P') {
                             cores[count].core_type = 2; // P-core
+                        } else if (cluster_type && cluster_type[0] == 'S') {
+                            cores[count].core_type = 3; // S-core (Super)
                         } else {
                             cores[count].core_type = 0; // Unknown
                         }
@@ -1146,6 +1148,7 @@ const (
 	CoreTypeUnknown CoreType = 0
 	CoreTypeE       CoreType = 1 // Efficiency core
 	CoreTypeP       CoreType = 2 // Performance core
+	CoreTypeS       CoreType = 3 // Super core (M5+)
 )
 
 // CoreTopologyEntry represents a single CPU core's topology information
@@ -1186,18 +1189,18 @@ func GetCoreTopology() ([]CoreTopologyEntry, error) {
 	return result, nil
 }
 
-// BuildCoreLabels creates the correct E/P labels based on dynamic topology detection.
-// Returns: labels (sorted E first, then P), eCount, pCount, and cpuIndexMap (maps display index -> Mach API index)
-func BuildCoreLabels() ([]string, int, int, []int) {
+// BuildCoreLabels creates the correct E/P/S labels based on dynamic topology detection.
+// Returns: labels (sorted E first, then P, then S), eCount, pCount, sCount, and cpuIndexMap (maps display index -> Mach API index)
+func BuildCoreLabels() ([]string, int, int, int, []int) {
 	topology, err := GetCoreTopology()
 	if err != nil || len(topology) == 0 {
 		// Fallback to sysctl-based counts (old behavior)
-		return nil, 0, 0, nil
+		return nil, 0, 0, 0, nil
 	}
 
 	// topology is already sorted by CPUID (done in GetCoreTopology)
 	// The position in this sorted array corresponds to the Mach API index (0, 1, 2, ...)
-	// We need to separate E-cores and P-cores while preserving their Mach API indices
+	// We need to separate E-cores, P-cores, and S-cores while preserving their Mach API indices
 
 	// Track the Mach API index (position in sorted topology) for each core
 	type coreWithMachIndex struct {
@@ -1207,6 +1210,7 @@ func BuildCoreLabels() ([]string, int, int, []int) {
 
 	var eCores []coreWithMachIndex
 	var pCores []coreWithMachIndex
+	var sCores []coreWithMachIndex
 
 	for machIdx, entry := range topology {
 		switch entry.CoreType {
@@ -1214,12 +1218,14 @@ func BuildCoreLabels() ([]string, int, int, []int) {
 			eCores = append(eCores, coreWithMachIndex{machIdx, entry.CoreType})
 		case CoreTypeP:
 			pCores = append(pCores, coreWithMachIndex{machIdx, entry.CoreType})
+		case CoreTypeS:
+			sCores = append(sCores, coreWithMachIndex{machIdx, entry.CoreType})
 		}
 	}
 
-	// Build sorted list: E-cores first, then P-cores
+	// Build sorted list: E-cores first, then P-cores, then S-cores
 	// cpuIndexMap maps display index -> Mach API index
-	totalCores := len(eCores) + len(pCores)
+	totalCores := len(eCores) + len(pCores) + len(sCores)
 	labels := make([]string, totalCores)
 	cpuIndexMap := make([]int, totalCores)
 
@@ -1234,8 +1240,13 @@ func BuildCoreLabels() ([]string, int, int, []int) {
 		cpuIndexMap[idx] = core.machIndex
 		idx++
 	}
+	for i, core := range sCores {
+		labels[idx] = fmt.Sprintf("S%d", i)
+		cpuIndexMap[idx] = core.machIndex
+		idx++
+	}
 
-	return labels, len(eCores), len(pCores), cpuIndexMap
+	return labels, len(eCores), len(pCores), len(sCores), cpuIndexMap
 }
 
 // GPUProcessStat represents per-process GPU usage

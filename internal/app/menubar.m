@@ -38,6 +38,8 @@ typedef struct {
   double ecluster_active;
   int pcluster_freq_mhz;
   double pcluster_active;
+  int scluster_freq_mhz;
+  double scluster_active;
   double net_in_bytes_per_sec;
   double net_out_bytes_per_sec;
   double disk_read_kb_per_sec;
@@ -285,6 +287,7 @@ static NSColor *headerColor(void) { return [NSColor labelColor]; }
 @property(strong, nonatomic) NSMenuItem *cpuUsageItem;
 @property(strong, nonatomic) NSMenuItem *cpuEClusterItem;
 @property(strong, nonatomic) NSMenuItem *cpuPClusterItem;
+@property(strong, nonatomic) NSMenuItem *cpuSClusterItem;
 @property(strong, nonatomic) NSMenuItem *cpuWattsItem;
 @property(strong, nonatomic) NSMenuItem *cpuTempItem;
 @property(strong, nonatomic) NSMenuItem *gpuUsageItem;
@@ -1008,6 +1011,10 @@ static void buildMenu(void) {
     [menu addItem:g_delegate.cpuEClusterItem];
     g_delegate.cpuPClusterItem = makeMetricItem(@"P-Cluster:", @"\u2014");
     [menu addItem:g_delegate.cpuPClusterItem];
+    g_delegate.cpuSClusterItem = makeMetricItem(@"S-Cluster:", @"\u2014");
+    [menu addItem:g_delegate.cpuSClusterItem];
+    g_delegate.cpuSClusterItem.hidden =
+        YES; // Hidden until S-cluster data arrives
     g_delegate.cpuWattsItem = makeMetricItem(@"Power:", @"\u2014");
     [menu addItem:g_delegate.cpuWattsItem];
     g_delegate.cpuTempItem = makeMetricItem(@"Temp:", @"\u2014");
@@ -1252,6 +1259,16 @@ void cleanupMenuBar(void) {
                  value:[NSString stringWithFormat:@"%d MHz (%.1f%%)",
                                                   metrics.pcluster_freq_mhz,
                                                   metrics.pcluster_active]];
+
+    // S-Cluster: only show when data is present (M5+)
+    if (metrics.scluster_freq_mhz > 0 || metrics.scluster_active > 0) {
+      self.cpuSClusterItem.hidden = NO;
+      v = (MactopMetricView *)self.cpuSClusterItem.view;
+      [v setTwoToneLabel:@"S-Cluster:"
+                   value:[NSString stringWithFormat:@"%d MHz (%.1f%%)",
+                                                    metrics.scluster_freq_mhz,
+                                                    metrics.scluster_active]];
+    }
     v = (MactopMetricView *)self.cpuWattsItem.view;
     [v setTwoToneLabel:@"Power:"
                  value:[NSString

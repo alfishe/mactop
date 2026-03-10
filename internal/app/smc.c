@@ -160,3 +160,38 @@ kern_return_t SMCGetKeyInfo(io_connect_t conn, const char *key,
   *keyInfo = outputStructure.keyInfo;
   return kIOReturnSuccess;
 }
+
+kern_return_t SMCWriteKey(io_connect_t conn, const char *key,
+                          unsigned int dataType, SMCBytes_t bytes,
+                          unsigned int dataSize) {
+  kern_return_t result;
+  SMCKeyData_t inputStructure;
+  SMCKeyData_t outputStructure;
+
+  memset(&inputStructure, 0, sizeof(SMCKeyData_t));
+  memset(&outputStructure, 0, sizeof(SMCKeyData_t));
+
+  inputStructure.key = (key[0] << 24) | (key[1] << 16) | (key[2] << 8) | key[3];
+  inputStructure.data8 = SMC_CMD_WRITE_BYTES;
+  inputStructure.keyInfo.dataSize = dataSize;
+  inputStructure.keyInfo.dataType = dataType;
+  memcpy(inputStructure.bytes, bytes, dataSize);
+
+  result = SMCCall(conn, KERNEL_INDEX_SMC, &inputStructure, &outputStructure);
+  return result;
+}
+
+kern_return_t SMCSetFloat(io_connect_t conn, const char *key, float value) {
+  // First read the key info to get the correct data type and size
+  SMCKeyData_keyInfo_t keyInfo;
+  kern_return_t result = SMCGetKeyInfo(conn, key, &keyInfo);
+  if (result != kIOReturnSuccess) {
+    return result;
+  }
+
+  SMCBytes_t bytes;
+  memset(bytes, 0, sizeof(bytes));
+  memcpy(bytes, &value, sizeof(float));
+
+  return SMCWriteKey(conn, key, keyInfo.dataType, bytes, keyInfo.dataSize);
+}

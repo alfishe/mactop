@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -74,6 +75,26 @@ type HeadlessVolume struct {
 	UsedPct float64 `json:"used_percent" yaml:"used_percent" xml:"UsedPercent" toon:"used_percent"`
 }
 
+// HeadlessTempGroup shows averaged temperature data per sensor category
+type HeadlessTempGroup struct {
+	Group   string  `json:"group" yaml:"group" xml:"Group" toon:"group"`
+	Avg     float64 `json:"avg_celsius" yaml:"avg_celsius" xml:"AvgCelsius" toon:"avg_celsius"`
+	Min     float64 `json:"min_celsius" yaml:"min_celsius" xml:"MinCelsius" toon:"min_celsius"`
+	Max     float64 `json:"max_celsius" yaml:"max_celsius" xml:"MaxCelsius" toon:"max_celsius"`
+	Sensors int     `json:"sensor_count" yaml:"sensor_count" xml:"SensorCount" toon:"sensor_count"`
+}
+
+// HeadlessFan shows fan data with human-readable mode
+type HeadlessFan struct {
+	ID        int    `json:"id" yaml:"id" xml:"ID" toon:"id"`
+	Name      string `json:"name" yaml:"name" xml:"Name" toon:"name"`
+	RPM       int    `json:"rpm" yaml:"rpm" xml:"RPM" toon:"rpm"`
+	TargetRPM int    `json:"target_rpm" yaml:"target_rpm" xml:"TargetRPM" toon:"target_rpm"`
+	MinRPM    int    `json:"min_rpm" yaml:"min_rpm" xml:"MinRPM" toon:"min_rpm"`
+	MaxRPM    int    `json:"max_rpm" yaml:"max_rpm" xml:"MaxRPM" toon:"max_rpm"`
+	Mode      string `json:"mode" yaml:"mode" xml:"Mode" toon:"mode"`
+}
+
 type HeadlessOutput struct {
 	Timestamp             string               `json:"timestamp" yaml:"timestamp" xml:"Timestamp" toon:"timestamp"`
 	SocMetrics            SocMetrics           `json:"soc_metrics" yaml:"soc_metrics" xml:"SocMetrics" toon:"soc_metrics"`
@@ -82,6 +103,7 @@ type HeadlessOutput struct {
 	CPUUsage              float64              `json:"cpu_usage" yaml:"cpu_usage" xml:"CPUUsage" toon:"cpu_usage"`
 	ECPUUsage             []float64            `json:"ecpu_usage" yaml:"ecpu_usage" xml:"ECPUUsage" toon:"ecpu_usage"`
 	PCPUUsage             []float64            `json:"pcpu_usage" yaml:"pcpu_usage" xml:"PCPUUsage" toon:"pcpu_usage"`
+	SCPUUsage             []float64            `json:"scpu_usage,omitempty" yaml:"scpu_usage,omitempty" xml:"SCPUUsage" toon:"scpu_usage"`
 	GPUUsage              float64              `json:"gpu_usage" yaml:"gpu_usage" xml:"GPUUsage" toon:"gpu_usage"`
 	GPUMetrics            HeadlessGPUMetrics   `json:"gpu_metrics" yaml:"gpu_metrics" xml:"GPUMetrics" toon:"gpu_metrics"`
 	TFLOPsFP32            float64              `json:"tflops_fp32" yaml:"tflops_fp32" xml:"TFLOPsFP32" toon:"tflops_fp32"`
@@ -96,6 +118,8 @@ type HeadlessOutput struct {
 	TBNetTotalBytesInSec  float64              `json:"tb_net_total_bytes_in_per_sec" yaml:"tb_net_total_bytes_in_per_sec" xml:"TBNetTotalBytesInSec" toon:"tb_net_total_bytes_in_per_sec"`
 	TBNetTotalBytesOutSec float64              `json:"tb_net_total_bytes_out_per_sec" yaml:"tb_net_total_bytes_out_per_sec" xml:"TBNetTotalBytesOutSec" toon:"tb_net_total_bytes_out_per_sec"`
 	RDMAStatus            RDMAStatus           `json:"rdma_status" yaml:"rdma_status" xml:"RDMAStatus" toon:"rdma_status"`
+	Fans                  []HeadlessFan        `json:"fans,omitempty" yaml:"fans,omitempty" xml:"Fans" toon:"fans"`
+	Temperatures          []HeadlessTempGroup  `json:"temperatures,omitempty" yaml:"temperatures,omitempty" xml:"Temperatures" toon:"temperatures"`
 }
 
 func runHeadless(count int) {
@@ -484,7 +508,10 @@ func collectHeadlessData(tbInfo *ThunderboltOutput, sysInfo SystemInfo) Headless
 		})
 	}
 
-	return HeadlessOutput{
+	orderedTemps := buildHeadlessTempGroups(m.TempSensors, sysInfo)
+	headlessFans := buildHeadlessFans(m.Fans)
+
+	output := HeadlessOutput{
 		Timestamp:             time.Now().Format(time.RFC3339),
 		SocMetrics:            m,
 		Memory:                mem,
@@ -506,7 +533,13 @@ func collectHeadlessData(tbInfo *ThunderboltOutput, sysInfo SystemInfo) Headless
 		TBNetTotalBytesOutSec: tbNetTotalOut,
 		RDMAStatus:            rdmaStatus,
 		ThermalState:          thermalStr,
+		Fans:                  headlessFans,
+		Temperatures:          orderedTemps,
 	}
+	if sysInfo.SCoreCount > 0 {
+		output.SCPUUsage = []float64{float64(m.SClusterFreqMHz), m.SClusterActive}
+	}
+	return output
 }
 
 func mapTBNetStatsToBuses(tbNetStats []ThunderboltNetStats, tbInfo *ThunderboltOutput) {
@@ -591,4 +624,77 @@ func mapRDMADevicesToBuses(rdmaDevices []RDMADevice, tbInfo *ThunderboltOutput) 
 			}
 		}
 	}
+}
+
+func buildHeadlessTempGroups(sensors []TempSensor, sysInfo SystemInfo) []HeadlessTempGroup {
+	classified := classifyCPUCoreSensors(sensors, sysInfo)
+	groups := make(map[string]*tempGroup)
+	var order []string
+	for _, s := range classified {
+		cat := sensorGroupName(s.Key)
+		if s.Name == "CPU E-Core" || s.Name == "CPU P-Core" || s.Name == "CPU S-Core" {
+			cat = s.Name
+		}
+		g, exists := groups[cat]
+		if !exists {
+			g = &tempGroup{min: s.Value, max: s.Value}
+			groups[cat] = g
+			order = append(order, cat)
+		}
+		g.sum += s.Value
+		g.count++
+		if s.Value < g.min {
+			g.min = s.Value
+		}
+		if s.Value > g.max {
+			g.max = s.Value
+		}
+	}
+
+	preferred := []string{"CPU E-Core", "CPU P-Core", "CPU S-Core", "CPU Core", "CPU Die", "GPU", "SoC Package", "Memory", "SSD", "NAND", "Ambient", "VRM", "Board", "Thunderbolt", "Wireless", "Display"}
+	var result []HeadlessTempGroup
+	seen := make(map[string]bool)
+	for _, name := range preferred {
+		if g, ok := groups[name]; ok {
+			result = append(result, newHeadlessTempGroup(name, g))
+			seen[name] = true
+		}
+	}
+	for _, name := range order {
+		if !seen[name] {
+			result = append(result, newHeadlessTempGroup(name, groups[name]))
+		}
+	}
+	return result
+}
+
+func newHeadlessTempGroup(name string, g *tempGroup) HeadlessTempGroup {
+	avg := math.Round(g.sum/float64(g.count)*10) / 10
+	return HeadlessTempGroup{
+		Group:   name,
+		Avg:     avg,
+		Min:     math.Round(g.min*10) / 10,
+		Max:     math.Round(g.max*10) / 10,
+		Sensors: g.count,
+	}
+}
+
+func buildHeadlessFans(fans []FanInfo) []HeadlessFan {
+	var result []HeadlessFan
+	for _, f := range fans {
+		mode := "auto"
+		if f.Mode == 1 {
+			mode = "manual"
+		}
+		result = append(result, HeadlessFan{
+			ID:        f.ID,
+			Name:      f.Name,
+			RPM:       f.ActualRPM,
+			TargetRPM: f.TargetRPM,
+			MinRPM:    f.MinRPM,
+			MaxRPM:    f.MaxRPM,
+			Mode:      mode,
+		})
+	}
+	return result
 }

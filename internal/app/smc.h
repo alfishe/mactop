@@ -60,11 +60,14 @@ typedef struct {
 io_connect_t SMCOpen(void);
 kern_return_t SMCClose(io_connect_t conn);
 kern_return_t SMCReadKey(io_connect_t conn, const char *key, SMCKeyData_t *val);
-kern_return_t SMCReadKey(io_connect_t conn, const char *key, SMCKeyData_t *val);
 double SMCGetFloatValue(io_connect_t conn, const char *key);
 int SMCGetKeyCount(io_connect_t conn);
 kern_return_t SMCGetKeyFromIndex(io_connect_t conn, int index, char *outputKey);
 kern_return_t SMCGetKeyInfo(io_connect_t conn, const char *key,
                             SMCKeyData_keyInfo_t *keyInfo);
+kern_return_t SMCWriteKey(io_connect_t conn, const char *key,
+                          unsigned int dataType, SMCBytes_t bytes,
+                          unsigned int dataSize);
+kern_return_t SMCSetFloat(io_connect_t conn, const char *key, float value);
 
 #endif

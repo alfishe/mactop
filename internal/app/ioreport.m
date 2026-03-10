@@ -151,6 +151,24 @@ extern double IOHIDEventGetFloatValue(IOHIDEventRef event, int64_t field);
 #define kHIDUsage_AppleVendor_TemperatureSensor 0x0005
 #define kIOHIDEventTypeTemperature 15
 
+// Fan info structure
+typedef struct {
+  char name[32];
+  int actualRPM;
+  int minRPM;
+  int maxRPM;
+  int targetRPM;
+  int mode; // 0=auto, 1=forced
+  int id;
+} fan_info_t;
+
+// Temperature sensor structure
+typedef struct {
+  char key[5];
+  char name[64];
+  float value;
+} temp_sensor_t;
+
 static IOReportSubscriptionRef g_subscription = NULL;
 static CFMutableDictionaryRef g_channels = NULL;
 static io_connect_t g_smcConn = 0;
@@ -160,9 +178,16 @@ static uint32_t g_ecpu_freqs[64];
 static int g_ecpu_freq_count = 0;
 static uint32_t g_pcpu_freqs[64];
 static int g_pcpu_freq_count = 0;
+static uint32_t g_scpu_freqs[64];
+static int g_scpu_freq_count = 0;
+
+// All discovered temperature sensors
+static temp_sensor_t g_all_temp_sensors[128];
+static int g_all_temp_sensor_count = 0;
 
 static int cfStringStartsWith(CFStringRef str, const char *prefix);
 static void loadSMCTempKeys();
+static void loadAllTempSensors();
 
 static void parseFreqData(CFDataRef data, uint32_t *outFreqs, int *outCount) {
   if (data == NULL)
@@ -220,6 +245,15 @@ static void loadCpuFrequencies() {
               properties, CFSTR("voltage-states-sram")); // fallback?
           if (pData != NULL) {
             parseFreqData(pData, g_pcpu_freqs, &g_pcpu_freq_count);
+          }
+        }
+
+        // S-Cluster (Super cores, M5+): try voltage-states3-sram
+        if (g_scpu_freq_count == 0) {
+          CFDataRef sData = (CFDataRef)CFDictionaryGetValue(
+              properties, CFSTR("voltage-states3-sram"));
+          if (sData != NULL) {
+            parseFreqData(sData, g_scpu_freqs, &g_scpu_freq_count);
           }
         }
 
@@ -522,13 +556,21 @@ typedef struct {
   double gpuActive;
   double eClusterActive;
   double pClusterActive;
+  double sClusterActive;
   int eClusterFreqMHz;
   int pClusterFreqMHz;
+  int sClusterFreqMHz;
   float socTemp;
   float cpuTemp;
   float gpuTemp;
   int64_t dramReadBytes;
   int64_t dramWriteBytes;
+  // Fan data
+  int fanCount;
+  fan_info_t fans[8];
+  // Comprehensive temperature sensors
+  int tempSensorCount;
+  temp_sensor_t temps[128];
 } PowerMetrics;
 
 static int cfStringMatch(CFStringRef str, const char *match) {
@@ -600,6 +642,83 @@ static int g_cpu_key_count = 0;
 static char g_gpu_keys[64][5];
 static int g_gpu_key_count = 0;
 
+static const char *tempSensorName(const char *key) {
+  if (key[0] != 'T')
+    return "Unknown";
+
+  // Multi-char prefix matching for accuracy on Apple Silicon
+  // TPD* = SoC Package Die, TRD* = GPU Render Die, TCM* = CPU Die Max
+  if (key[1] == 'P' && key[2] == 'D')
+    return "SoC Package";
+  if (key[1] == 'P' && key[2] == 'M')
+    return "SoC Package";
+  if (key[1] == 'P' && key[2] == 'S')
+    return "SoC Package";
+  if (key[1] == 'R' && key[2] == 'D')
+    return "GPU";
+  if (key[1] == 'C' && key[2] == 'M')
+    return "CPU Die"; // TCMb, TCMz = die max
+  if (key[1] == 'C' && key[2] == 'D')
+    return "CPU Die"; // TCDX = die aggregate
+
+  switch (key[1]) {
+  case 'p':
+    return "CPU P-Core"; // Tp* = P-core per-core temps (M1/M2/M4)
+  case 'e':
+    return "CPU E-Core"; // Te* = E-core per-core temps (M3/M4)
+  case 'f':
+    return "CPU P-Core"; // Tf* = P-core per-core temps (M3)
+  case 'g':
+    return "GPU"; // Tg* = GPU cluster temps
+  case 'C':
+    return "CPU Core"; // TC1x-TCAx = CPU core temps
+  case 'c':
+    return "CPU Core"; // Tc* = CPU core
+  case 'm':
+    return "Memory"; // Tm* = Memory controller/DRAM
+  case 'M':
+    return "Memory"; // TM* = Memory VRM
+  case 's':
+    return "SSD"; // Ts* = SSD proximity
+  case 'S':
+    return "SSD"; // TS* = SSD controller
+  case 'H':
+    return "NAND"; // TH* = NAND/NVMe controller
+  case 'a':
+    return "Ambient"; // Ta* = Ambient/airflow probes
+  case 'A':
+    return "Ambient"; // TA* = Ambient
+  case 'B':
+    return "Board"; // TB* = Board thermal sensors (not battery on desktops)
+  case 'b':
+    return "Board"; // Tb* = Board
+  case 'V':
+    return "VRM"; // TV* = Voltage regulator module
+  case 'P':
+    return "SoC Package"; // TP* = SoC package/power supply
+  case 'R':
+    return "GPU"; // TR* = GPU render die
+  case 'T':
+    return "Thunderbolt"; // TT* = Thunderbolt controller
+  case 'I':
+    return "Thunderbolt"; // TI* = Thunderbolt interface
+  case 'w':
+  case 'W':
+    return "Wireless";
+  case 'D':
+  case 'd':
+    return "Display";
+  case 'N':
+    return "NAND";
+  case 'L':
+    return "Display";
+  case 'F':
+    return "Ambient"; // TF* = Fan proximity
+  default:
+    return "Other";
+  }
+}
+
 static void loadSMCTempKeys() {
   if (g_cpu_key_count > 0 || g_gpu_key_count > 0)
     return;
@@ -611,7 +730,6 @@ static void loadSMCTempKeys() {
   for (int i = 0; i < totalKeys; i++) {
     char key[5];
     if (SMCGetKeyFromIndex(g_smcConn, i, key) != kIOReturnSuccess) {
-      // printf("Failed to get key at index %d\n", i);
       continue;
     }
 
@@ -636,8 +754,149 @@ static void loadSMCTempKeys() {
       }
     }
   }
-  // printf("Total CPU Keys: %d, Total GPU Keys: %d\n", g_cpu_key_count,
-  //        g_gpu_key_count);
+}
+
+static void loadAllTempSensors() {
+  if (g_all_temp_sensor_count > 0)
+    return;
+
+  if (!g_smcConn)
+    return;
+
+  int totalKeys = SMCGetKeyCount(g_smcConn);
+  for (int i = 0; i < totalKeys && g_all_temp_sensor_count < 128; i++) {
+    char key[5];
+    if (SMCGetKeyFromIndex(g_smcConn, i, key) != kIOReturnSuccess)
+      continue;
+
+    // Only temperature keys start with 'T'
+    if (key[0] != 'T')
+      continue;
+
+    SMCKeyData_keyInfo_t keyInfo;
+    if (SMCGetKeyInfo(g_smcConn, key, &keyInfo) != kIOReturnSuccess)
+      continue;
+
+    // Filter for 'flt ' type (1718383648)
+    if (keyInfo.dataType != 1718383648)
+      continue;
+
+    // Read current value to ensure it's a valid sensor
+    float val = (float)SMCGetFloatValue(g_smcConn, key);
+    if (val <= 0 || val > 200)
+      continue;
+
+    temp_sensor_t *sensor = &g_all_temp_sensors[g_all_temp_sensor_count];
+    strcpy(sensor->key, key);
+    snprintf(sensor->name, sizeof(sensor->name), "%s %c%c", tempSensorName(key),
+             key[2], key[3]);
+    sensor->value = val;
+    g_all_temp_sensor_count++;
+  }
+}
+
+// Read fan data from SMC
+static int readFanInfo(fan_info_t *fans, int maxFans) {
+  if (!g_smcConn)
+    return 0;
+
+  // Read number of fans
+  SMCKeyData_t val;
+  if (SMCReadKey(g_smcConn, "FNum", &val) != kIOReturnSuccess)
+    return 0;
+
+  // FNum is typically a ui8 (1 byte)
+  int fanCount = (unsigned char)val.bytes[0];
+  if (fanCount <= 0 || fanCount > maxFans)
+    fanCount = (fanCount > maxFans) ? maxFans : fanCount;
+
+  for (int i = 0; i < fanCount; i++) {
+    char key[5];
+    fans[i].id = i;
+
+    // Read actual RPM: F%dAc
+    snprintf(key, sizeof(key), "F%dAc", i);
+    fans[i].actualRPM = (int)SMCGetFloatValue(g_smcConn, key);
+
+    // Read min RPM: F%dMn
+    snprintf(key, sizeof(key), "F%dMn", i);
+    fans[i].minRPM = (int)SMCGetFloatValue(g_smcConn, key);
+
+    // Read max RPM: F%dMx
+    snprintf(key, sizeof(key), "F%dMx", i);
+    fans[i].maxRPM = (int)SMCGetFloatValue(g_smcConn, key);
+
+    // Read target RPM: F%dTg
+    snprintf(key, sizeof(key), "F%dTg", i);
+    fans[i].targetRPM = (int)SMCGetFloatValue(g_smcConn, key);
+
+    // Read mode: F%dMd (flt type — 0.0=auto, 1.0=forced)
+    snprintf(key, sizeof(key), "F%dMd", i);
+    fans[i].mode = (int)SMCGetFloatValue(g_smcConn, key);
+
+    // Fan name — use index-based naming
+    snprintf(fans[i].name, sizeof(fans[i].name), "Fan %d", i);
+  }
+
+  return fanCount;
+}
+
+// Fan control functions
+int setFanForceTest(int enabled) {
+  if (!g_smcConn)
+    return -1;
+  float val = enabled ? 1.0f : 0.0f;
+  return (SMCSetFloat(g_smcConn, "Ftst", val) == kIOReturnSuccess) ? 0 : -1;
+}
+
+int setFanMode(int fanIndex, int mode) {
+  if (!g_smcConn)
+    return -1;
+  char key[5];
+  snprintf(key, sizeof(key), "F%dMd", fanIndex);
+  float val = (float)mode;
+  return (SMCSetFloat(g_smcConn, key, val) == kIOReturnSuccess) ? 0 : -1;
+}
+
+int setFanTarget(int fanIndex, int rpm) {
+  if (!g_smcConn)
+    return -1;
+
+  // Read bounds for clamping
+  char key[5];
+  snprintf(key, sizeof(key), "F%dMn", fanIndex);
+  int minRPM = (int)SMCGetFloatValue(g_smcConn, key);
+  snprintf(key, sizeof(key), "F%dMx", fanIndex);
+  int maxRPM = (int)SMCGetFloatValue(g_smcConn, key);
+
+  // Clamp to hardware bounds
+  if (rpm < minRPM)
+    rpm = minRPM;
+  if (maxRPM > 0 && rpm > maxRPM)
+    rpm = maxRPM;
+
+  snprintf(key, sizeof(key), "F%dTg", fanIndex);
+  float val = (float)rpm;
+  return (SMCSetFloat(g_smcConn, key, val) == kIOReturnSuccess) ? 0 : -1;
+}
+
+int resetFansToAuto() {
+  if (!g_smcConn)
+    return -1;
+
+  // Clear force test mode
+  setFanForceTest(0);
+
+  // Read fan count
+  SMCKeyData_t val;
+  if (SMCReadKey(g_smcConn, "FNum", &val) != kIOReturnSuccess)
+    return -1;
+
+  int fanCount = (unsigned char)val.bytes[0];
+  for (int i = 0; i < fanCount && i < 8; i++) {
+    setFanMode(i, 0); // 0 = auto
+  }
+  return 0;
 }
 
 static float readSocTemperature(float *outCpuTemp, float *outGpuTemp) {
@@ -862,8 +1121,9 @@ PowerMetrics samplePowerMetrics(int durationMs) {
                          cfStringContains(channelRef, "CPU0");
         int isPCluster = cfStringContains(channelRef, "PCPU") ||
                          cfStringContains(channelRef, "CPU1");
+        int isSCluster = cfStringContains(channelRef, "SCPU");
 
-        if (isECluster || isPCluster) {
+        if (isECluster || isPCluster || isSCluster) {
           int32_t stateCount = IOReportStateGetCount(item);
           int64_t totalTime = 0;
           int64_t activeTime = 0;
@@ -882,7 +1142,6 @@ PowerMetrics samplePowerMetrics(int durationMs) {
               char nameBuf[64] = {0};
               CFStringGetCString(stateName, nameBuf, sizeof(nameBuf),
                                  kCFStringEncodingUTF8);
-              // printf("Debug: Cluster State: %s\n", nameBuf);
 
               int freq = 0;
 
@@ -895,6 +1154,8 @@ PowerMetrics samplePowerMetrics(int durationMs) {
                     freq = g_ecpu_freqs[vIdx];
                   } else if (isPCluster && vIdx < g_pcpu_freq_count) {
                     freq = g_pcpu_freqs[vIdx];
+                  } else if (isSCluster && vIdx < g_scpu_freq_count) {
+                    freq = g_scpu_freqs[vIdx];
                   }
                 }
               }
@@ -931,9 +1192,12 @@ PowerMetrics samplePowerMetrics(int durationMs) {
             if (isECluster) {
               metrics.eClusterActive = activePercent;
               metrics.eClusterFreqMHz = avgFreq;
-            } else {
+            } else if (isPCluster) {
               metrics.pClusterActive = activePercent;
               metrics.pClusterFreqMHz = avgFreq;
+            } else if (isSCluster) {
+              metrics.sClusterActive = activePercent;
+              metrics.sClusterFreqMHz = avgFreq;
             }
           }
         }
@@ -959,6 +1223,22 @@ PowerMetrics samplePowerMetrics(int durationMs) {
 
   if (g_smcConn) {
     metrics.systemPower = SMCGetFloatValue(g_smcConn, "PSTR");
+  }
+
+  // Read fan data
+  metrics.fanCount = readFanInfo(metrics.fans, 8);
+
+  // Read all temperature sensors
+  loadAllTempSensors();
+  metrics.tempSensorCount = g_all_temp_sensor_count;
+  for (int i = 0; i < g_all_temp_sensor_count && i < 128; i++) {
+    metrics.temps[i] = g_all_temp_sensors[i];
+    // Refresh sensor value
+    if (g_smcConn) {
+      float v = (float)SMCGetFloatValue(g_smcConn, g_all_temp_sensors[i].key);
+      if (v > 0)
+        metrics.temps[i].value = v;
+    }
   }
 
   CFRelease(delta);
