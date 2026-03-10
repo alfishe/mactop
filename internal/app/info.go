@@ -655,7 +655,7 @@ func buildFanTempText(themeColor string) string {
 		lines = append(lines, fmt.Sprintf("[No temperature sensors detected](fg:%s)", themeColor))
 	}
 
-	return strings.Join(lines, "\n")
+	return renderScrollableLines(lines, themeColor)
 }
 
 // buildFanControlText renders a compact single-line status bar
@@ -666,10 +666,4 @@ func buildFanControlText(themeColor string) string {
 	}
 	return fmt.Sprintf("[Read-only](fg:%s)  Use --fan-control to enable writes  |  [l](fg:%s,mod:bold) Layout  [F](fg:%s,mod:bold) Exit fan view",
 		themeColor, themeColor, themeColor)
-}
-
-// buildFanText is kept for backward compatibility (used by old code paths)
-func buildFanText() string {
-	themeColor := getThemeColor()
-	return buildFanStatusText(themeColor) + "\n" + buildFanTempText(themeColor)
 }
