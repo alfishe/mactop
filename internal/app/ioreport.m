@@ -13,7 +13,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/sysctl.h>
+#include <dlfcn.h>
 #include <unistd.h>
+#include <pthread.h>
 
 // Wi-Fi link info structure
 typedef struct {
@@ -151,6 +154,24 @@ extern double IOHIDEventGetFloatValue(IOHIDEventRef event, int64_t field);
 #define kHIDUsage_AppleVendor_TemperatureSensor 0x0005
 #define kIOHIDEventTypeTemperature 15
 
+// Fan info structure
+typedef struct {
+  char name[32];
+  int actualRPM;
+  int minRPM;
+  int maxRPM;
+  int targetRPM;
+  int mode; // 0=auto, 1=forced
+  int id;
+} fan_info_t;
+
+// Temperature sensor structure
+typedef struct {
+  char key[5];
+  char name[64];
+  float value;
+} temp_sensor_t;
+
 static IOReportSubscriptionRef g_subscription = NULL;
 static CFMutableDictionaryRef g_channels = NULL;
 static io_connect_t g_smcConn = 0;
@@ -160,9 +181,16 @@ static uint32_t g_ecpu_freqs[64];
 static int g_ecpu_freq_count = 0;
 static uint32_t g_pcpu_freqs[64];
 static int g_pcpu_freq_count = 0;
+static uint32_t g_scpu_freqs[64];
+static int g_scpu_freq_count = 0;
+
+// All discovered temperature sensors
+static temp_sensor_t g_all_temp_sensors[128];
+static int g_all_temp_sensor_count = 0;
 
 static int cfStringStartsWith(CFStringRef str, const char *prefix);
 static void loadSMCTempKeys();
+static void loadAllTempSensors();
 
 static void parseFreqData(CFDataRef data, uint32_t *outFreqs, int *outCount) {
   if (data == NULL)
@@ -220,6 +248,15 @@ static void loadCpuFrequencies() {
               properties, CFSTR("voltage-states-sram")); // fallback?
           if (pData != NULL) {
             parseFreqData(pData, g_pcpu_freqs, &g_pcpu_freq_count);
+          }
+        }
+
+        // S-Cluster (Super cores, M5+): try voltage-states3-sram
+        if (g_scpu_freq_count == 0) {
+          CFDataRef sData = (CFDataRef)CFDictionaryGetValue(
+              properties, CFSTR("voltage-states3-sram"));
+          if (sData != NULL) {
+            parseFreqData(sData, g_scpu_freqs, &g_scpu_freq_count);
           }
         }
 
@@ -335,6 +372,331 @@ static void loadGpuFrequencies() {
   IOObjectRelease(iterator);
 }
 
+// === kperf-based DRAM BW monitoring (fallback for M5+ chips) ===
+// On M5+ chips, IOReport AMC Stats channels are kernel-blocked.
+// We use hardware PMU counters (L1D cache miss events) via Apple's
+// private kperf/kpep frameworks to measure CPU-side DRAM bandwidth.
+// Each L1D cache miss = 128-byte cache line fetch from L2/DRAM.
+// Requires root for PMU access; works without root but BW shows 0.
+
+#define KPC_CLASS_FIXED  1
+#define KPC_CLASS_CONFIG 2
+#define KPC_CLASS_POWER  4
+
+typedef uint32_t (*kpc_get_counter_count_fn)(uint32_t);
+typedef int (*kpc_force_all_ctrs_set_fn)(int);
+typedef int (*kpc_set_counting_fn)(uint32_t);
+typedef int (*kpc_set_thread_counting_fn)(uint32_t);
+typedef int (*kpc_get_config_fn)(uint32_t, void *);
+typedef int (*kpc_get_cpu_counters_fn)(int, uint32_t, int *, uint64_t *);
+typedef uint32_t (*kpc_get_config_count_fn)(uint32_t);
+
+typedef int (*kpep_db_create_fn)(const char *, void **);
+typedef void (*kpep_db_free_fn)(void *);
+typedef int (*kpep_db_event_fn)(void *, const char *, void **);
+typedef int (*kpep_config_create_fn)(void *, void **);
+typedef void (*kpep_config_free_fn)(void *);
+typedef int (*kpep_config_add_event_fn)(void *, void **, uint32_t, uint32_t *);
+typedef int (*kpep_config_force_counters_fn)(void *);
+typedef int (*kpep_config_apply_fn)(void *);
+
+static int g_kperf_active = 0;
+static int g_kperf_ncpu = 0;
+static uint32_t g_kperf_nFixed = 0;
+static uint32_t g_kperf_nConfig = 0;
+static uint32_t g_kperf_perCpu = 0;
+static uint32_t g_kperf_classes = 0;
+static kpc_get_cpu_counters_fn g_getCpuCounters = NULL;
+static kpc_force_all_ctrs_set_fn g_forceCtrs = NULL;
+static uint64_t *g_kperf_prev = NULL;  // Previous sample buffer
+
+static void initKperfDramBW(void) {
+  void *kperfdata = dlopen("/System/Library/PrivateFrameworks/kperfdata.framework/kperfdata", RTLD_NOW);
+  void *kperf_lib = dlopen("/System/Library/PrivateFrameworks/kperf.framework/kperf", RTLD_NOW);
+  if (!kperfdata || !kperf_lib) return;
+
+  kpc_get_counter_count_fn counterCount = dlsym(kperf_lib, "kpc_get_counter_count");
+  kpc_force_all_ctrs_set_fn forceCtrs = dlsym(kperf_lib, "kpc_force_all_ctrs_set");
+  kpc_set_counting_fn setCounting = dlsym(kperf_lib, "kpc_set_counting");
+  kpc_set_thread_counting_fn setThreadCounting = dlsym(kperf_lib, "kpc_set_thread_counting");
+  kpc_get_cpu_counters_fn getCpuCounters = dlsym(kperf_lib, "kpc_get_cpu_counters");
+
+  kpep_db_create_fn dbCreate = dlsym(kperfdata, "kpep_db_create");
+  kpep_db_free_fn dbFree = dlsym(kperfdata, "kpep_db_free");
+  kpep_db_event_fn dbEvent = dlsym(kperfdata, "kpep_db_event");
+  kpep_config_create_fn cfgCreate = dlsym(kperfdata, "kpep_config_create");
+  kpep_config_free_fn cfgFree = dlsym(kperfdata, "kpep_config_free");
+  kpep_config_add_event_fn cfgAdd = dlsym(kperfdata, "kpep_config_add_event");
+  kpep_config_force_counters_fn cfgForce = dlsym(kperfdata, "kpep_config_force_counters");
+  kpep_config_apply_fn cfgApply = dlsym(kperfdata, "kpep_config_apply");
+
+  if (!counterCount || !forceCtrs || !setCounting || !getCpuCounters) return;
+
+  // Get CPU count and counter layout first (no privileges needed)
+  int ncpu = 0;
+  size_t ncpuSz = sizeof(ncpu);
+  sysctlbyname("hw.ncpu", &ncpu, &ncpuSz, NULL, 0);
+  if (ncpu <= 0) return;
+
+  uint32_t nFixed = counterCount(KPC_CLASS_FIXED);
+  uint32_t nConfig = counterCount(KPC_CLASS_CONFIG);
+  uint32_t nPower = counterCount(KPC_CLASS_POWER);
+  uint32_t perCpu = nFixed + nConfig + nPower;
+  uint32_t allClasses = KPC_CLASS_FIXED | KPC_CLASS_CONFIG | KPC_CLASS_POWER;
+
+  int hasRoot = (forceCtrs(1) == 0);
+
+  if (hasRoot) {
+    // Root path: configure PMU for L1D cache miss events via kpep
+    if (dbCreate && dbEvent && cfgCreate && cfgAdd && cfgForce && cfgApply) {
+      void *db = NULL;
+      if (dbCreate(NULL, &db) == 0 && db) {
+        void *cfg = NULL;
+        if (cfgCreate(db, &cfg) == 0 && cfg) {
+          void *evLd = NULL, *evSt = NULL;
+          dbEvent(db, "L1D_CACHE_MISS_LD_NONSPEC", &evLd);
+          dbEvent(db, "L1D_CACHE_MISS_ST_NONSPEC", &evSt);
+          uint32_t idx;
+          if (evLd) cfgAdd(cfg, &evLd, 0, &idx);
+          if (evSt) cfgAdd(cfg, &evSt, 0, &idx);
+          cfgForce(cfg);
+          cfgApply(cfg);
+          if (cfgFree) cfgFree(cfg);
+        }
+        if (dbFree) dbFree(db);
+      }
+    }
+    setCounting(allClasses);
+    if (setThreadCounting) setThreadCounting(allClasses);
+  } else {
+    // Non-root path: try to read existing counters without configuration.
+    // Enable counting (may succeed without root on some macOS versions).
+    setCounting(allClasses);
+    if (setThreadCounting) setThreadCounting(allClasses);
+  }
+
+  // Allocate buffer for previous sample
+  g_kperf_prev = calloc((size_t)ncpu * perCpu, sizeof(uint64_t));
+  if (!g_kperf_prev) {
+    if (hasRoot) forceCtrs(0);
+    return;
+  }
+
+  // Test if counter reading actually works
+  int cpu;
+  int ret = getCpuCounters(1, allClasses, &cpu, g_kperf_prev);
+  if (ret != 0) {
+    free(g_kperf_prev);
+    g_kperf_prev = NULL;
+    if (hasRoot) forceCtrs(0);
+    return;
+  }
+
+  // Verify we got non-zero data in configurable counters
+  int hasData = 0;
+  for (int c = 0; c < ncpu && !hasData; c++) {
+    size_t base = (size_t)c * perCpu;
+    if (g_kperf_prev[base + nFixed] > 0) hasData = 1;
+  }
+  if (!hasData) {
+    free(g_kperf_prev);
+    g_kperf_prev = NULL;
+    if (hasRoot) forceCtrs(0);
+    return;
+  }
+
+  g_kperf_active = 1;
+  g_kperf_ncpu = ncpu;
+  g_kperf_nFixed = nFixed;
+  g_kperf_nConfig = nConfig;
+  g_kperf_perCpu = perCpu;
+  g_kperf_classes = allClasses;
+  g_getCpuCounters = getCpuCounters;
+  g_forceCtrs = hasRoot ? forceCtrs : NULL;
+}
+
+// Read kperf DRAM BW: returns read/write bytes since last call
+static void readKperfDramBW(int64_t *readBytes, int64_t *writeBytes) {
+  *readBytes = 0;
+  *writeBytes = 0;
+  if (!g_kperf_active || !g_getCpuCounters || !g_kperf_prev) return;
+
+  size_t bufSize = (size_t)g_kperf_ncpu * g_kperf_perCpu;
+  uint64_t *cur = calloc(bufSize, sizeof(uint64_t));
+  if (!cur) return;
+
+  int cpu;
+  g_getCpuCounters(1, g_kperf_classes, &cpu, cur);
+
+  // Sum L1D miss deltas across all CPUs
+  // Counter layout per CPU: [fixed0, fixed1, cfg0, cfg1, cfg2, ..., pwr0, ...]
+  // cfg0 = L1D_CACHE_MISS_LD_NONSPEC, cfg1 = L1D_CACHE_MISS_ST_NONSPEC
+  //
+  // Per-CPU delta cap: A single Apple Silicon core maxes ~280M L1D misses/sec
+  // under extreme memory stress. Any delta > 500M per core is a CPU sleep/wake
+  // artifact (counter jumping from 0 to accumulated boot-time value).
+  static const int64_t MAX_MISS_PER_CPU = 500000000LL;  // 500M
+
+  int64_t totalLdMiss = 0, totalStMiss = 0;
+  for (int c = 0; c < g_kperf_ncpu; c++) {
+    size_t base = (size_t)c * g_kperf_perCpu;
+    uint64_t ldCur = cur[base + g_kperf_nFixed];
+    uint64_t ldPrev = g_kperf_prev[base + g_kperf_nFixed];
+    uint64_t stCur = cur[base + g_kperf_nFixed + 1];
+    uint64_t stPrev = g_kperf_prev[base + g_kperf_nFixed + 1];
+
+    // Only sum positive deltas within the per-CPU cap
+    if (ldCur > ldPrev) {
+      int64_t d = (int64_t)(ldCur - ldPrev);
+      if (d <= MAX_MISS_PER_CPU) totalLdMiss += d;
+    }
+    if (stCur > stPrev) {
+      int64_t d = (int64_t)(stCur - stPrev);
+      if (d <= MAX_MISS_PER_CPU) totalStMiss += d;
+    }
+  }
+
+  // Each L1D miss = 128-byte cache line transfer
+  *readBytes = totalLdMiss * 128;
+  *writeBytes = totalStMiss * 128;
+
+  // Save current as previous for next call
+  memcpy(g_kperf_prev, cur, bufSize * sizeof(uint64_t));
+  free(cur);
+}
+
+// Forward declarations for calibration function
+static int cfStringMatch(CFStringRef str, const char *cStr);
+static int cfStringStartsWith(CFStringRef str, const char *prefix);
+static double energyToWatts(int64_t energy, CFStringRef unitRef, double durationMs);
+
+// === Auto-calibration for DRAM power → bandwidth conversion ===
+// On M5+ chips where AMC Stats is kernel-blocked, we estimate DRAM BW from
+// DRAM power. The conversion factor (GB/s per watt) is chip-specific, so we
+// auto-calibrate at startup by running a brief known workload:
+//   1. Spawn 4 threads reading 256MB buffers (>> L2 cache → every read hits DRAM)
+//   2. Measure exact bytes read and DRAM power delta simultaneously
+//   3. Derive: g_dramGBsPerWatt = measured_throughput / measured_power_delta
+// This makes the formula accurate on ANY chip without hard-coding.
+static double g_dramGBsPerWatt = 25.1; // default fallback
+static double g_dramIdlePowerW = 0.3;  // DRAM idle/static power (leakage + refresh)
+static volatile int g_calib_running = 0;
+static volatile int64_t g_calib_bytes = 0;
+
+static void *calibThread(void *arg) {
+  size_t sz = 256ULL * 1024 * 1024; // 256MB per thread (>> L2 cache per core)
+  volatile char *buf = malloc(sz);
+  if (!buf) return NULL;
+  memset((void *)buf, 0xAB, sz);
+  while (g_calib_running) {
+    volatile uint64_t sum = 0;
+    for (size_t i = 0; i < sz; i += 128)
+      sum += buf[i];
+    // Update byte counter atomically inside the loop so the main thread
+    // can read g_calib_bytes at any point during the measurement window.
+    __sync_fetch_and_add(&g_calib_bytes, (int64_t)sz);
+  }
+  free((void *)buf);
+  return NULL;
+}
+
+// Run auto-calibration. Called once at init when power-based DRAM BW is needed.
+// Takes ~2 seconds. Measures DRAM power during known workload to derive
+// the GB/s-per-watt constant for this specific chip.
+static void calibrateDramBwFromPower(void) {
+  if (g_channels == NULL || g_subscription == NULL)
+    return;
+
+  // Step 1: idle baseline (500ms)
+  CFDictionaryRef s1 = IOReportCreateSamples(g_subscription, g_channels, NULL);
+  usleep(500000);
+  CFDictionaryRef s2 = IOReportCreateSamples(g_subscription, g_channels, NULL);
+
+  double idleDramPower = 0;
+  if (s1 && s2) {
+    CFDictionaryRef delta = IOReportCreateSamplesDelta(s1, s2, NULL);
+    if (delta) {
+      CFArrayRef arr = CFDictionaryGetValue(delta, CFSTR("IOReportChannels"));
+      CFIndex cnt = arr ? CFArrayGetCount(arr) : 0;
+      for (CFIndex i = 0; i < cnt; i++) {
+        CFDictionaryRef ch = (CFDictionaryRef)CFArrayGetValueAtIndex(arr, i);
+        CFStringRef grp = IOReportChannelGetGroup(ch);
+        CFStringRef name = IOReportChannelGetChannelName(ch);
+        if (grp && name && cfStringMatch(grp, "Energy Model") &&
+            cfStringStartsWith(name, "DRAM")) {
+          int64_t val = IOReportSimpleGetIntegerValue(ch, 0);
+          CFStringRef unitRef = IOReportChannelGetUnitLabel(ch);
+          idleDramPower += energyToWatts(val, unitRef, 500.0);
+        }
+      }
+      CFRelease(delta);
+    }
+  }
+  if (s1) CFRelease(s1);
+  if (s2) CFRelease(s2);
+
+  // Step 2: run 4 threads for ~1.5 seconds, measure during 1 second
+  __sync_lock_test_and_set(&g_calib_bytes, 0);
+  g_calib_running = 1;
+  pthread_t threads[4];
+  for (int t = 0; t < 4; t++)
+    pthread_create(&threads[t], NULL, calibThread, NULL);
+
+  usleep(500000); // 500ms ramp — let DRAM frequency settle
+
+  // Reset counter, then measure for exactly 1 second
+  __sync_lock_test_and_set(&g_calib_bytes, 0);
+  s1 = IOReportCreateSamples(g_subscription, g_channels, NULL);
+  usleep(1000000); // 1 second measurement
+  s2 = IOReportCreateSamples(g_subscription, g_channels, NULL);
+  int64_t bytesRead = g_calib_bytes;
+
+  g_calib_running = 0;
+  for (int t = 0; t < 4; t++)
+    pthread_join(threads[t], NULL);
+
+  // Extract DRAM power during stress
+  double stressDramPower = 0;
+  if (s1 && s2) {
+    CFDictionaryRef delta = IOReportCreateSamplesDelta(s1, s2, NULL);
+    if (delta) {
+      CFArrayRef arr = CFDictionaryGetValue(delta, CFSTR("IOReportChannels"));
+      CFIndex cnt = arr ? CFArrayGetCount(arr) : 0;
+      for (CFIndex i = 0; i < cnt; i++) {
+        CFDictionaryRef ch = (CFDictionaryRef)CFArrayGetValueAtIndex(arr, i);
+        CFStringRef grp = IOReportChannelGetGroup(ch);
+        CFStringRef name = IOReportChannelGetChannelName(ch);
+        if (grp && name && cfStringMatch(grp, "Energy Model") &&
+            cfStringStartsWith(name, "DRAM")) {
+          int64_t val = IOReportSimpleGetIntegerValue(ch, 0);
+          CFStringRef unitRef = IOReportChannelGetUnitLabel(ch);
+          stressDramPower += energyToWatts(val, unitRef, 1000.0);
+        }
+      }
+      CFRelease(delta);
+    }
+  }
+  if (s1) CFRelease(s1);
+  if (s2) CFRelease(s2);
+
+  // Derive calibration constant
+  double deltaPower = stressDramPower - idleDramPower;
+  double throughputGBs = (double)bytesRead / 1e9; // GB in 1 second
+
+  if (deltaPower > 0.01 && throughputGBs > 1.0) {
+    g_dramGBsPerWatt = throughputGBs / deltaPower;
+    // Use 90% of measured idle as baseline: some "idle" power includes
+    // background memory traffic We want to subtract static/leakage only.
+    g_dramIdlePowerW = idleDramPower * 0.9;
+    // Sanity check: should be between 5 and 500 GB/s per watt
+    if (g_dramGBsPerWatt < 5.0 || g_dramGBsPerWatt > 500.0) {
+      g_dramGBsPerWatt = 25.1; // fall back to default
+    }
+    if (g_dramIdlePowerW < 0) g_dramIdlePowerW = 0;
+  }
+}
+
+
 int initIOReport() {
   if (g_channels != NULL) {
     return 0;
@@ -343,6 +705,7 @@ int initIOReport() {
   CFStringRef energyGroup = CFSTR("Energy Model");
   CFStringRef gpuGroup = CFSTR("GPU Stats");
   CFStringRef cpuGroup = CFSTR("CPU Stats");
+  CFStringRef amcGroup = CFSTR("AMC Stats");
 
   CFDictionaryRef energyChan =
       IOReportCopyChannelsInGroup(energyGroup, NULL, 0, 0, 0);
@@ -364,6 +727,24 @@ int initIOReport() {
     IOReportMergeChannels(energyChan, cpuChan, NULL);
     CFRelease(cpuChan);
   }
+
+  CFDictionaryRef amcChan =
+      IOReportCopyChannelsInGroup(amcGroup, NULL, 0, 0, 0);
+  if (amcChan != NULL) {
+    IOReportMergeChannels(energyChan, amcChan, NULL);
+    CFRelease(amcChan);
+  }
+
+  // PMP group provides DRAM bandwidth data on A-series chips (A18 Pro, etc.)
+  // where AMC Stats channels are present but produce no delta data.
+  CFDictionaryRef pmpChan =
+      IOReportCopyChannelsInGroup(CFSTR("PMP"), NULL, 0, 0, 0);
+  if (pmpChan != NULL) {
+    IOReportMergeChannels(energyChan, pmpChan, NULL);
+    CFRelease(pmpChan);
+  }
+
+
 
   CFIndex size = CFDictionaryGetCount(energyChan);
   g_channels =
@@ -389,6 +770,54 @@ int initIOReport() {
 
   g_smcConn = SMCOpen();
   loadSMCTempKeys();
+
+  // Initialize kperf-based DRAM BW monitoring as fallback.
+  // This configures PMU counters for L1D cache miss events.
+  // Requires root; fails silently without root.
+  initKperfDramBW();
+
+  // Auto-calibrate DRAM power → bandwidth conversion.
+  // Runs a brief ~2 second memory benchmark to derive the chip-specific
+  // GB/s-per-watt constant. Only needed on M5+ where AMC Stats is blocked.
+  // On M1-M4, AMC Stats provides direct byte counters so this is unused.
+  //
+  // Probe AMC Stats / PMP with a quick 100ms sample first to avoid the
+  // ~2 second calibration delay on chips that don't need it.
+  {
+    CFDictionaryRef probe1 = IOReportCreateSamples(g_subscription, g_channels, NULL);
+    usleep(100000); // 100ms probe
+    CFDictionaryRef probe2 = IOReportCreateSamples(g_subscription, g_channels, NULL);
+    int hasDirectBW = 0;
+    if (probe1 && probe2) {
+      CFDictionaryRef probeDelta = IOReportCreateSamplesDelta(probe1, probe2, NULL);
+      if (probeDelta) {
+        CFArrayRef arr = CFDictionaryGetValue(probeDelta, CFSTR("IOReportChannels"));
+        CFIndex cnt = arr ? CFArrayGetCount(arr) : 0;
+        for (CFIndex i = 0; i < cnt && !hasDirectBW; i++) {
+          CFDictionaryRef ch = (CFDictionaryRef)CFArrayGetValueAtIndex(arr, i);
+          CFStringRef grp = IOReportChannelGetGroup(ch);
+          if (!grp) continue;
+          if (cfStringMatch(grp, "AMC Stats") || cfStringMatch(grp, "PMP")) {
+            char name[256] = {0};
+            CFStringRef nameRef = IOReportChannelGetChannelName(ch);
+            if (nameRef)
+              CFStringGetCString(nameRef, name, sizeof(name), kCFStringEncodingUTF8);
+            if (strstr(name, "RD") || strstr(name, "WR")) {
+              int64_t val = IOReportSimpleGetIntegerValue(ch, 0);
+              if (val > 0) hasDirectBW = 1;
+            }
+          }
+        }
+        CFRelease(probeDelta);
+      }
+    }
+    if (probe1) CFRelease(probe1);
+    if (probe2) CFRelease(probe2);
+
+    if (!hasDirectBW) {
+      calibrateDramBwFromPower();
+    }
+  }
 
   return 0;
 }
@@ -514,11 +943,21 @@ typedef struct {
   double gpuActive;
   double eClusterActive;
   double pClusterActive;
+  double sClusterActive;
   int eClusterFreqMHz;
   int pClusterFreqMHz;
+  int sClusterFreqMHz;
   float socTemp;
   float cpuTemp;
   float gpuTemp;
+  int64_t dramReadBytes;
+  int64_t dramWriteBytes;
+  // Fan data
+  int fanCount;
+  fan_info_t fans[8];
+  // Comprehensive temperature sensors
+  int tempSensorCount;
+  temp_sensor_t temps[128];
 } PowerMetrics;
 
 static int cfStringMatch(CFStringRef str, const char *match) {
@@ -590,6 +1029,83 @@ static int g_cpu_key_count = 0;
 static char g_gpu_keys[64][5];
 static int g_gpu_key_count = 0;
 
+static const char *tempSensorName(const char *key) {
+  if (key[0] != 'T')
+    return "Unknown";
+
+  // Multi-char prefix matching for accuracy on Apple Silicon
+  // TPD* = SoC Package Die, TRD* = GPU Render Die, TCM* = CPU Die Max
+  if (key[1] == 'P' && key[2] == 'D')
+    return "SoC Package";
+  if (key[1] == 'P' && key[2] == 'M')
+    return "SoC Package";
+  if (key[1] == 'P' && key[2] == 'S')
+    return "SoC Package";
+  if (key[1] == 'R' && key[2] == 'D')
+    return "GPU";
+  if (key[1] == 'C' && key[2] == 'M')
+    return "CPU Die"; // TCMb, TCMz = die max
+  if (key[1] == 'C' && key[2] == 'D')
+    return "CPU Die"; // TCDX = die aggregate
+
+  switch (key[1]) {
+  case 'p':
+    return "CPU P-Core"; // Tp* = P-core per-core temps (M1/M2/M4)
+  case 'e':
+    return "CPU E-Core"; // Te* = E-core per-core temps (M3/M4)
+  case 'f':
+    return "CPU P-Core"; // Tf* = P-core per-core temps (M3)
+  case 'g':
+    return "GPU"; // Tg* = GPU cluster temps
+  case 'C':
+    return "CPU Core"; // TC1x-TCAx = CPU core temps
+  case 'c':
+    return "CPU Core"; // Tc* = CPU core
+  case 'm':
+    return "Memory"; // Tm* = Memory controller/DRAM
+  case 'M':
+    return "Memory"; // TM* = Memory VRM
+  case 's':
+    return "SSD"; // Ts* = SSD proximity
+  case 'S':
+    return "SSD"; // TS* = SSD controller
+  case 'H':
+    return "NAND"; // TH* = NAND/NVMe controller
+  case 'a':
+    return "Ambient"; // Ta* = Ambient/airflow probes
+  case 'A':
+    return "Ambient"; // TA* = Ambient
+  case 'B':
+    return "Board"; // TB* = Board thermal sensors (not battery on desktops)
+  case 'b':
+    return "Board"; // Tb* = Board
+  case 'V':
+    return "VRM"; // TV* = Voltage regulator module
+  case 'P':
+    return "SoC Package"; // TP* = SoC package/power supply
+  case 'R':
+    return "GPU"; // TR* = GPU render die
+  case 'T':
+    return "Thunderbolt"; // TT* = Thunderbolt controller
+  case 'I':
+    return "Thunderbolt"; // TI* = Thunderbolt interface
+  case 'w':
+  case 'W':
+    return "Wireless";
+  case 'D':
+  case 'd':
+    return "Display";
+  case 'N':
+    return "NAND";
+  case 'L':
+    return "Display";
+  case 'F':
+    return "Ambient"; // TF* = Fan proximity
+  default:
+    return "Other";
+  }
+}
+
 static void loadSMCTempKeys() {
   if (g_cpu_key_count > 0 || g_gpu_key_count > 0)
     return;
@@ -601,7 +1117,6 @@ static void loadSMCTempKeys() {
   for (int i = 0; i < totalKeys; i++) {
     char key[5];
     if (SMCGetKeyFromIndex(g_smcConn, i, key) != kIOReturnSuccess) {
-      // printf("Failed to get key at index %d\n", i);
       continue;
     }
 
@@ -626,8 +1141,151 @@ static void loadSMCTempKeys() {
       }
     }
   }
-  // printf("Total CPU Keys: %d, Total GPU Keys: %d\n", g_cpu_key_count,
-  //        g_gpu_key_count);
+}
+
+static void loadAllTempSensors() {
+  if (g_all_temp_sensor_count > 0)
+    return;
+
+  if (!g_smcConn)
+    return;
+
+  int totalKeys = SMCGetKeyCount(g_smcConn);
+  for (int i = 0; i < totalKeys && g_all_temp_sensor_count < 128; i++) {
+    char key[5];
+    if (SMCGetKeyFromIndex(g_smcConn, i, key) != kIOReturnSuccess)
+      continue;
+
+    // Only temperature keys start with 'T'
+    if (key[0] != 'T')
+      continue;
+
+    SMCKeyData_keyInfo_t keyInfo;
+    if (SMCGetKeyInfo(g_smcConn, key, &keyInfo) != kIOReturnSuccess)
+      continue;
+
+    // Filter for 'flt ' type (1718383648)
+    if (keyInfo.dataType != 1718383648)
+      continue;
+
+    // Skip sensors with extreme values (> 200°C likely invalid)
+    // Note: don't exclude val <= 0 here — sensors may read 0°C when idle
+    // (e.g., inactive SSD, cold component) and warm up later.
+    float val = (float)SMCGetFloatValue(g_smcConn, key);
+    if (val > 200)
+      continue;
+
+    temp_sensor_t *sensor = &g_all_temp_sensors[g_all_temp_sensor_count];
+    strcpy(sensor->key, key);
+    snprintf(sensor->name, sizeof(sensor->name), "%s %c%c", tempSensorName(key),
+             key[2], key[3]);
+    sensor->value = val;
+    g_all_temp_sensor_count++;
+  }
+}
+
+// Read fan data from SMC
+static int readFanInfo(fan_info_t *fans, int maxFans) {
+  if (!g_smcConn)
+    return 0;
+
+  // Read number of fans
+  SMCKeyData_t val;
+  if (SMCReadKey(g_smcConn, "FNum", &val) != kIOReturnSuccess)
+    return 0;
+
+  // FNum is typically a ui8 (1 byte)
+  int fanCount = (unsigned char)val.bytes[0];
+  if (fanCount > maxFans)
+    fanCount = maxFans;
+
+  for (int i = 0; i < fanCount; i++) {
+    char key[5];
+    fans[i].id = i;
+
+    // Read actual RPM: F%dAc
+    snprintf(key, sizeof(key), "F%dAc", i);
+    fans[i].actualRPM = (int)SMCGetFloatValue(g_smcConn, key);
+
+    // Read min RPM: F%dMn
+    snprintf(key, sizeof(key), "F%dMn", i);
+    fans[i].minRPM = (int)SMCGetFloatValue(g_smcConn, key);
+
+    // Read max RPM: F%dMx
+    snprintf(key, sizeof(key), "F%dMx", i);
+    fans[i].maxRPM = (int)SMCGetFloatValue(g_smcConn, key);
+
+    // Read target RPM: F%dTg
+    snprintf(key, sizeof(key), "F%dTg", i);
+    fans[i].targetRPM = (int)SMCGetFloatValue(g_smcConn, key);
+
+    // Read mode: F%dMd (flt type — 0.0=auto, 1.0=forced)
+    snprintf(key, sizeof(key), "F%dMd", i);
+    fans[i].mode = (int)SMCGetFloatValue(g_smcConn, key);
+
+    // Fan name — use index-based naming
+    snprintf(fans[i].name, sizeof(fans[i].name), "Fan %d", i);
+  }
+
+  return fanCount;
+}
+
+// Fan control functions
+int setFanForceTest(int enabled) {
+  if (!g_smcConn)
+    return -1;
+  float val = enabled ? 1.0f : 0.0f;
+  return (SMCSetFloat(g_smcConn, "Ftst", val) == kIOReturnSuccess) ? 0 : -1;
+}
+
+int setFanMode(int fanIndex, int mode) {
+  if (!g_smcConn)
+    return -1;
+  char key[5];
+  snprintf(key, sizeof(key), "F%dMd", fanIndex);
+  float val = (float)mode;
+  return (SMCSetFloat(g_smcConn, key, val) == kIOReturnSuccess) ? 0 : -1;
+}
+
+int setFanTarget(int fanIndex, int rpm) {
+  if (!g_smcConn)
+    return -1;
+
+  // Read bounds for clamping
+  char key[5];
+  snprintf(key, sizeof(key), "F%dMn", fanIndex);
+  int minRPM = (int)SMCGetFloatValue(g_smcConn, key);
+  snprintf(key, sizeof(key), "F%dMx", fanIndex);
+  int maxRPM = (int)SMCGetFloatValue(g_smcConn, key);
+
+  // Clamp to hardware bounds
+  if (rpm < minRPM)
+    rpm = minRPM;
+  if (maxRPM > 0 && rpm > maxRPM)
+    rpm = maxRPM;
+
+  snprintf(key, sizeof(key), "F%dTg", fanIndex);
+  float val = (float)rpm;
+  return (SMCSetFloat(g_smcConn, key, val) == kIOReturnSuccess) ? 0 : -1;
+}
+
+int resetFansToAuto() {
+  if (!g_smcConn)
+    return -1;
+
+  // Clear force test mode
+  setFanForceTest(0);
+
+  // Read fan count
+  SMCKeyData_t val;
+  if (SMCReadKey(g_smcConn, "FNum", &val) != kIOReturnSuccess)
+    return -1;
+
+  int fanCount = (unsigned char)val.bytes[0];
+  for (int i = 0; i < fanCount && i < 8; i++) {
+    setFanMode(i, 0); // 0 = auto
+  }
+  return 0;
 }
 
 static float readSocTemperature(float *outCpuTemp, float *outGpuTemp) {
@@ -742,7 +1400,7 @@ static float readSocTemperature(float *outCpuTemp, float *outGpuTemp) {
 }
 
 PowerMetrics samplePowerMetrics(int durationMs) {
-  PowerMetrics metrics = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  PowerMetrics metrics = {0};
 
   if (g_subscription == NULL || g_channels == NULL) {
     if (initIOReport() != 0) {
@@ -780,6 +1438,24 @@ PowerMetrics samplePowerMetrics(int durationMs) {
   }
 
   CFIndex count = CFArrayGetCount(channels);
+  // Temporary accumulators for CPU cluster metrics.
+  // We accumulate here first and assign to metrics after the loop,
+  // because on M5+ chips the channel iteration order is not guaranteed
+  // (PCPU may appear before MCPU0/MCPU1).
+  double eClusterActive = 0, pClusterActive = 0, sClusterActive = 0;
+  int eClusterFreq = 0, pClusterFreq = 0, sClusterFreq = 0;
+  // M-cluster (M5+) accumulators
+  double mClusterActiveSum = 0;
+  int mClusterFreqMax = 0;
+  int mClusterCount = 0;
+  // PCPU accumulator (may be P-cluster on M1-M4, or S-cluster on M5+)
+  double pcpuActive = 0;
+  int pcpuFreq = 0;
+  int hasPCPU = 0;
+
+  int64_t pmpDramReadBytes = 0;
+  int64_t pmpDramWriteBytes = 0;
+
   for (CFIndex i = 0; i < count; i++) {
     CFDictionaryRef item = (CFDictionaryRef)CFArrayGetValueAtIndex(channels, i);
     if (item == NULL)
@@ -790,6 +1466,8 @@ PowerMetrics samplePowerMetrics(int durationMs) {
 
     if (groupRef == NULL || channelRef == NULL)
       continue;
+
+
 
     if (cfStringMatch(groupRef, "Energy Model")) {
       CFStringRef unitRef = IOReportChannelGetUnitLabel(item);
@@ -847,13 +1525,19 @@ PowerMetrics samplePowerMetrics(int durationMs) {
       if (subgroupRef != NULL &&
           cfStringMatch(subgroupRef, "CPU Complex Performance States")) {
 
-        // E-Cluster (usually CPU0 or ECPU)
-        int isECluster = cfStringContains(channelRef, "ECPU") ||
-                         cfStringContains(channelRef, "CPU0");
-        int isPCluster = cfStringContains(channelRef, "PCPU") ||
-                         cfStringContains(channelRef, "CPU1");
+        // Check MCPU first — on M5+ chips, MCPU0/MCPU1 contain "CPU0"/"CPU1"
+        // which would falsely match the E-cluster/P-cluster fallbacks.
+        int isMCluster = cfStringContains(channelRef, "MCPU");
+        int isSCluster = cfStringContains(channelRef, "SCPU");
 
-        if (isECluster || isPCluster) {
+        // E-Cluster: ECPU (M1-M4), or legacy CPU0 fallback (but NOT MCPU0)
+        int isECluster = cfStringContains(channelRef, "ECPU") ||
+                         (!isMCluster && cfStringMatch(channelRef, "CPU0"));
+        // P-Cluster: PCPU (all chips), or legacy CPU1 fallback (but NOT MCPU1)
+        int isPCluster = cfStringContains(channelRef, "PCPU") ||
+                         (!isMCluster && cfStringMatch(channelRef, "CPU1"));
+
+        if (isECluster || isPCluster || isSCluster || isMCluster) {
           int32_t stateCount = IOReportStateGetCount(item);
           int64_t totalTime = 0;
           int64_t activeTime = 0;
@@ -872,7 +1556,6 @@ PowerMetrics samplePowerMetrics(int durationMs) {
               char nameBuf[64] = {0};
               CFStringGetCString(stateName, nameBuf, sizeof(nameBuf),
                                  kCFStringEncodingUTF8);
-              // printf("Debug: Cluster State: %s\n", nameBuf);
 
               int freq = 0;
 
@@ -883,8 +1566,10 @@ PowerMetrics samplePowerMetrics(int durationMs) {
                 if (sscanf(nameBuf, "V%d", &vIdx) == 1 && vIdx >= 0) {
                   if (isECluster && vIdx < g_ecpu_freq_count) {
                     freq = g_ecpu_freqs[vIdx];
-                  } else if (isPCluster && vIdx < g_pcpu_freq_count) {
+                  } else if ((isPCluster || isMCluster) && vIdx < g_pcpu_freq_count) {
                     freq = g_pcpu_freqs[vIdx];
+                  } else if (isSCluster && vIdx < g_scpu_freq_count) {
+                    freq = g_scpu_freqs[vIdx];
                   }
                 }
               }
@@ -919,22 +1604,148 @@ PowerMetrics samplePowerMetrics(int durationMs) {
             }
 
             if (isECluster) {
-              metrics.eClusterActive = activePercent;
-              metrics.eClusterFreqMHz = avgFreq;
-            } else {
-              metrics.pClusterActive = activePercent;
-              metrics.pClusterFreqMHz = avgFreq;
+              eClusterActive = activePercent;
+              eClusterFreq = avgFreq;
+            } else if (isMCluster) {
+              // M5+ Medium/Performance tier — accumulate across MCPU0, MCPU1
+              mClusterActiveSum += activePercent;
+              mClusterCount++;
+              if (avgFreq > mClusterFreqMax) {
+                mClusterFreqMax = avgFreq;
+              }
+            } else if (isPCluster) {
+              // PCPU — on M1-M4 this is the Performance cluster,
+              // on M5+ this is the Super cluster. We'll sort it out after the loop.
+              pcpuActive = activePercent;
+              pcpuFreq = avgFreq;
+              hasPCPU = 1;
+            } else if (isSCluster) {
+              sClusterActive = activePercent;
+              sClusterFreq = avgFreq;
             }
+          }
+        }
+      }
+    } else if (cfStringMatch(groupRef, "AMC Stats")) {
+      // Sum memory bandwidth from non-DCS channels to avoid double counting.
+      // DCS (DRAM Command Scheduler) channels are a subset of the total.
+      // Works on M-series chips (M1, M2, M3, M4, M5, etc.).
+      char channelName[256] = {0};
+      CFStringGetCString(channelRef, channelName, sizeof(channelName),
+                         kCFStringEncodingUTF8);
+      if (strstr(channelName, "DCS") == NULL) {
+        int64_t val = IOReportSimpleGetIntegerValue(item, 0);
+        if (strstr(channelName, "RD") != NULL) {
+          metrics.dramReadBytes += val;
+        } else if (strstr(channelName, "WR") != NULL) {
+          metrics.dramWriteBytes += val;
+        }
+      }
+    } else if (cfStringMatch(groupRef, "PMP")) {
+      // PMP group provides DRAM bandwidth on A-series chips (A18 Pro, etc.)
+      // where AMC Stats channels exist but produce no delta data.
+      // Channels are in subgroup "DRAM BW" with names like "F1 RD", "F1 WR",
+      // "F2 RD", etc. and unit "B" (bytes). Sum all frequency bins.
+      CFStringRef subgroupRef = IOReportChannelGetSubGroup(item);
+      if (subgroupRef != NULL && cfStringMatch(subgroupRef, "DRAM BW")) {
+        char channelName[256] = {0};
+        CFStringGetCString(channelRef, channelName, sizeof(channelName),
+                           kCFStringEncodingUTF8);
+        int64_t val = IOReportSimpleGetIntegerValue(item, 0);
+        if (val > 0) {
+          if (strstr(channelName, "RD") != NULL) {
+            pmpDramReadBytes += val;
+          } else if (strstr(channelName, "WR") != NULL) {
+            pmpDramWriteBytes += val;
           }
         }
       }
     }
   }
 
+  // Post-loop: assign accumulated CPU cluster metrics to final metrics.
+  // On M5+ chips (mClusterCount > 0): MCPU = Performance (pCluster), PCPU = Super (sCluster).
+  // On M1-M4 chips (mClusterCount == 0): PCPU = Performance (pCluster), ECPU = Efficiency (eCluster).
+  metrics.eClusterActive = eClusterActive;
+  metrics.eClusterFreqMHz = eClusterFreq;
+
+  if (mClusterCount > 0) {
+    // M5+ chip: MCPU average -> pCluster, PCPU -> sCluster
+    metrics.pClusterActive = mClusterActiveSum / mClusterCount;
+    metrics.pClusterFreqMHz = mClusterFreqMax;
+    if (hasPCPU) {
+      metrics.sClusterActive = pcpuActive;
+      metrics.sClusterFreqMHz = pcpuFreq;
+    } else {
+      metrics.sClusterActive = sClusterActive;
+      metrics.sClusterFreqMHz = sClusterFreq;
+    }
+  } else {
+    // M1-M4: PCPU -> pCluster, SCPU -> sCluster (if present)
+    if (hasPCPU) {
+      metrics.pClusterActive = pcpuActive;
+      metrics.pClusterFreqMHz = pcpuFreq;
+    }
+    metrics.sClusterActive = sClusterActive;
+    metrics.sClusterFreqMHz = sClusterFreq;
+  }
+
+  // Fallback: use PMP DRAM BW data when AMC Stats produces no bandwidth data.
+  if (metrics.dramReadBytes == 0 && metrics.dramWriteBytes == 0) {
+    metrics.dramReadBytes = pmpDramReadBytes;
+    metrics.dramWriteBytes = pmpDramWriteBytes;
+  }
+
+  // Fallback: estimate DRAM BW from DRAM power (no root needed, M5+ only).
+  // DRAM power = static (leakage/refresh) + dynamic (data transfer).
+  // Only dynamic power correlates with bandwidth, so subtract idle baseline.
+  // BW = max(0, (current_power - idle_power)) × calibration_constant
+  // The calibration_constant is auto-derived at startup (see calibrateDramBwFromPower).
+  // This path only fires on M5+ where AMC Stats is kernel-blocked.
+  // On M1-M4/A-series, AMC Stats/PMP provides direct byte counters.
+  if (metrics.dramReadBytes == 0 && metrics.dramWriteBytes == 0 &&
+      metrics.dramPower > 0.001) {
+    // Subtract static/idle power — only dynamic power indicates data transfer
+    double activePower = metrics.dramPower - g_dramIdlePowerW;
+    if (activePower < 0) activePower = 0;
+    double dramBwGBs = activePower * g_dramGBsPerWatt;
+    // Convert to bytes for this sample interval
+    double sampleSec = (double)durationMs / 1000.0;
+    int64_t totalBytes = (int64_t)(dramBwGBs * 1e9 * sampleSec);
+    // Split evenly between read and write (power can't distinguish direction)
+    metrics.dramReadBytes = totalBytes / 2;
+    metrics.dramWriteBytes = totalBytes / 2;
+  }
+
+  // Fallback: use kperf PMU counters for DRAM BW (requires root).
+  if (metrics.dramReadBytes == 0 && metrics.dramWriteBytes == 0 && g_kperf_active) {
+    int64_t kperfRd = 0, kperfWr = 0;
+    readKperfDramBW(&kperfRd, &kperfWr);
+    metrics.dramReadBytes = kperfRd;
+    metrics.dramWriteBytes = kperfWr;
+  }
+
+
   metrics.socTemp = readSocTemperature(&metrics.cpuTemp, &metrics.gpuTemp);
 
   if (g_smcConn) {
     metrics.systemPower = SMCGetFloatValue(g_smcConn, "PSTR");
+  }
+
+  // Read fan data
+  metrics.fanCount = readFanInfo(metrics.fans, 8);
+
+  // Read all temperature sensors
+  loadAllTempSensors();
+  metrics.tempSensorCount = g_all_temp_sensor_count;
+  for (int i = 0; i < g_all_temp_sensor_count && i < 128; i++) {
+    metrics.temps[i] = g_all_temp_sensors[i];
+    // Refresh sensor value
+    if (g_smcConn) {
+      float v = (float)SMCGetFloatValue(g_smcConn, g_all_temp_sensors[i].key);
+      if (v > 0)
+        metrics.temps[i].value = v;
+    }
   }
 
   CFRelease(delta);
@@ -951,6 +1762,15 @@ void cleanupIOReport() {
   if (g_smcConn) {
     SMCClose(g_smcConn);
     g_smcConn = 0;
+  }
+  // Clean up kperf
+  if (g_kperf_active && g_forceCtrs) {
+    g_forceCtrs(0);
+    g_kperf_active = 0;
+  }
+  if (g_kperf_prev) {
+    free(g_kperf_prev);
+    g_kperf_prev = NULL;
   }
 }
 

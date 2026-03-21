@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -74,14 +75,35 @@ type HeadlessVolume struct {
 	UsedPct float64 `json:"used_percent" yaml:"used_percent" xml:"UsedPercent" toon:"used_percent"`
 }
 
+// HeadlessTempGroup shows averaged temperature data per sensor category
+type HeadlessTempGroup struct {
+	Group   string  `json:"group" yaml:"group" xml:"Group" toon:"group"`
+	Avg     float64 `json:"avg_celsius" yaml:"avg_celsius" xml:"AvgCelsius" toon:"avg_celsius"`
+	Min     float64 `json:"min_celsius" yaml:"min_celsius" xml:"MinCelsius" toon:"min_celsius"`
+	Max     float64 `json:"max_celsius" yaml:"max_celsius" xml:"MaxCelsius" toon:"max_celsius"`
+	Sensors int     `json:"sensor_count" yaml:"sensor_count" xml:"SensorCount" toon:"sensor_count"`
+}
+
+// HeadlessFan shows fan data with human-readable mode
+type HeadlessFan struct {
+	ID        int    `json:"id" yaml:"id" xml:"ID" toon:"id"`
+	Name      string `json:"name" yaml:"name" xml:"Name" toon:"name"`
+	RPM       int    `json:"rpm" yaml:"rpm" xml:"RPM" toon:"rpm"`
+	TargetRPM int    `json:"target_rpm" yaml:"target_rpm" xml:"TargetRPM" toon:"target_rpm"`
+	MinRPM    int    `json:"min_rpm" yaml:"min_rpm" xml:"MinRPM" toon:"min_rpm"`
+	MaxRPM    int    `json:"max_rpm" yaml:"max_rpm" xml:"MaxRPM" toon:"max_rpm"`
+	Mode      string `json:"mode" yaml:"mode" xml:"Mode" toon:"mode"`
+}
+
 type HeadlessOutput struct {
 	Timestamp             string               `json:"timestamp" yaml:"timestamp" xml:"Timestamp" toon:"timestamp"`
 	SocMetrics            SocMetrics           `json:"soc_metrics" yaml:"soc_metrics" xml:"SocMetrics" toon:"soc_metrics"`
 	Memory                MemoryMetrics        `json:"memory" yaml:"memory" xml:"Memory" toon:"memory"`
 	NetDisk               NetDiskMetrics       `json:"net_disk" yaml:"net_disk" xml:"NetDisk" toon:"net_disk"`
 	CPUUsage              float64              `json:"cpu_usage" yaml:"cpu_usage" xml:"CPUUsage" toon:"cpu_usage"`
-	ECPUUsage             []float64            `json:"ecpu_usage" yaml:"ecpu_usage" xml:"ECPUUsage" toon:"ecpu_usage"`
+	ECPUUsage             []float64            `json:"ecpu_usage,omitempty" yaml:"ecpu_usage,omitempty" xml:"ECPUUsage" toon:"ecpu_usage"`
 	PCPUUsage             []float64            `json:"pcpu_usage" yaml:"pcpu_usage" xml:"PCPUUsage" toon:"pcpu_usage"`
+	SCPUUsage             []float64            `json:"scpu_usage,omitempty" yaml:"scpu_usage,omitempty" xml:"SCPUUsage" toon:"scpu_usage"`
 	GPUUsage              float64              `json:"gpu_usage" yaml:"gpu_usage" xml:"GPUUsage" toon:"gpu_usage"`
 	GPUMetrics            HeadlessGPUMetrics   `json:"gpu_metrics" yaml:"gpu_metrics" xml:"GPUMetrics" toon:"gpu_metrics"`
 	TFLOPsFP32            float64              `json:"tflops_fp32" yaml:"tflops_fp32" xml:"TFLOPsFP32" toon:"tflops_fp32"`
@@ -96,6 +118,8 @@ type HeadlessOutput struct {
 	TBNetTotalBytesInSec  float64              `json:"tb_net_total_bytes_in_per_sec" yaml:"tb_net_total_bytes_in_per_sec" xml:"TBNetTotalBytesInSec" toon:"tb_net_total_bytes_in_per_sec"`
 	TBNetTotalBytesOutSec float64              `json:"tb_net_total_bytes_out_per_sec" yaml:"tb_net_total_bytes_out_per_sec" xml:"TBNetTotalBytesOutSec" toon:"tb_net_total_bytes_out_per_sec"`
 	RDMAStatus            RDMAStatus           `json:"rdma_status" yaml:"rdma_status" xml:"RDMAStatus" toon:"rdma_status"`
+	Fans                  []HeadlessFan        `json:"fans,omitempty" yaml:"fans,omitempty" xml:"Fans" toon:"fans"`
+	Temperatures          []HeadlessTempGroup  `json:"temperatures,omitempty" yaml:"temperatures,omitempty" xml:"Temperatures" toon:"temperatures"`
 }
 
 func runHeadless(count int) {
@@ -188,8 +212,10 @@ func printHeadlessStart(format string, count int) {
 func printCSVHeader() {
 	headers := []string{
 		"Timestamp",
-		"System_Name", "Core_Count", "E_Core_Count", "P_Core_Count", "GPU_Core_Count",
-		"CPU_Usage", "ECPU_Freq_MHz", "ECPU_Active", "PCPU_Freq_MHz", "PCPU_Active", "GPU_Usage",
+		"System_Name", "Core_Count", "E_Core_Count", "P_Core_Count", "S_Core_Count", "GPU_Core_Count",
+		"CPU_Usage", "ECPU_Freq_MHz", "ECPU_Active", "PCPU_Freq_MHz", "PCPU_Active",
+		"SCPU_Freq_MHz", "SCPU_Active",
+		"GPU_Usage",
 		"GPU_Freq_MHz", "GPU_Active_Percent",
 		"Mem_Used", "Mem_Total", "Swap_Used",
 		"Disk_Read_KB", "Disk_Write_KB",
@@ -197,6 +223,7 @@ func printCSVHeader() {
 		"TB_Net_In_Bytes", "TB_Net_Out_Bytes",
 		"Total_Power", "System_Power",
 		"CPU_Temp", "GPU_Temp", "Thermal_State",
+		"DRAM_Read_BW_GBs", "DRAM_Write_BW_GBs", "DRAM_BW_Combined_GBs",
 		"RDMA_Available", "RDMA_Status", "RDMA_Device_Count",
 	}
 
@@ -302,12 +329,15 @@ func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo Sys
 			fmt.Sprintf("%d", output.SystemInfo.CoreCount),
 			fmt.Sprintf("%d", output.SystemInfo.ECoreCount),
 			fmt.Sprintf("%d", output.SystemInfo.PCoreCount),
+			fmt.Sprintf("%d", output.SystemInfo.SCoreCount),
 			fmt.Sprintf("%d", output.SystemInfo.GPUCoreCount),
 			fmt.Sprintf("%.2f", output.CPUUsage),
 			fmt.Sprintf("%.2f", safeFloat64At(output.ECPUUsage, 0)),
 			fmt.Sprintf("%.2f", safeFloat64At(output.ECPUUsage, 1)),
 			fmt.Sprintf("%.2f", safeFloat64At(output.PCPUUsage, 0)),
 			fmt.Sprintf("%.2f", safeFloat64At(output.PCPUUsage, 1)),
+			fmt.Sprintf("%.2f", safeFloat64At(output.SCPUUsage, 0)),
+			fmt.Sprintf("%.2f", safeFloat64At(output.SCPUUsage, 1)),
 			fmt.Sprintf("%.2f", output.GPUUsage),
 			fmt.Sprintf("%d", output.GPUMetrics.FreqMHz),
 			fmt.Sprintf("%.2f", output.GPUMetrics.ActivePercent),
@@ -325,6 +355,9 @@ func processHeadlessSample(format string, tbInfo *ThunderboltOutput, sysInfo Sys
 			fmt.Sprintf("%.2f", output.SocMetrics.CPUTemp),
 			fmt.Sprintf("%.2f", output.SocMetrics.GPUTemp),
 			output.ThermalState,
+			fmt.Sprintf("%.2f", output.SocMetrics.DRAMReadBW),
+			fmt.Sprintf("%.2f", output.SocMetrics.DRAMWriteBW),
+			fmt.Sprintf("%.2f", output.SocMetrics.DRAMBWCombined),
 			fmt.Sprintf("%t", output.RDMAStatus.Available),
 			output.RDMAStatus.Status,
 			fmt.Sprintf("%d", len(output.RDMAStatus.Devices)),
@@ -484,13 +517,15 @@ func collectHeadlessData(tbInfo *ThunderboltOutput, sysInfo SystemInfo) Headless
 		})
 	}
 
-	return HeadlessOutput{
+	orderedTemps := buildHeadlessTempGroups(m.TempSensors, sysInfo)
+	headlessFans := buildHeadlessFans(m.Fans)
+
+	output := HeadlessOutput{
 		Timestamp:             time.Now().Format(time.RFC3339),
 		SocMetrics:            m,
 		Memory:                mem,
 		NetDisk:               netDisk,
 		CPUUsage:              cpuUsage,
-		ECPUUsage:             []float64{float64(m.EClusterFreqMHz), m.EClusterActive},
 		PCPUUsage:             []float64{float64(m.PClusterFreqMHz), m.PClusterActive},
 		GPUUsage:              m.GPUActive,
 		GPUMetrics:            HeadlessGPUMetrics{FreqMHz: int(m.GPUFreqMHz), ActivePercent: m.GPUActive},
@@ -506,7 +541,16 @@ func collectHeadlessData(tbInfo *ThunderboltOutput, sysInfo SystemInfo) Headless
 		TBNetTotalBytesOutSec: tbNetTotalOut,
 		RDMAStatus:            rdmaStatus,
 		ThermalState:          thermalStr,
+		Fans:                  headlessFans,
+		Temperatures:          orderedTemps,
 	}
+	if sysInfo.ECoreCount > 0 {
+		output.ECPUUsage = []float64{float64(m.EClusterFreqMHz), m.EClusterActive}
+	}
+	if sysInfo.SCoreCount > 0 {
+		output.SCPUUsage = []float64{float64(m.SClusterFreqMHz), m.SClusterActive}
+	}
+	return output
 }
 
 func mapTBNetStatsToBuses(tbNetStats []ThunderboltNetStats, tbInfo *ThunderboltOutput) {
@@ -591,4 +635,77 @@ func mapRDMADevicesToBuses(rdmaDevices []RDMADevice, tbInfo *ThunderboltOutput) 
 			}
 		}
 	}
+}
+
+func buildHeadlessTempGroups(sensors []TempSensor, sysInfo SystemInfo) []HeadlessTempGroup {
+	classified := classifyCPUCoreSensors(sensors, sysInfo)
+	groups := make(map[string]*tempGroup)
+	var order []string
+	for _, s := range classified {
+		cat := sensorGroupName(s.Key)
+		if s.Name == "CPU E-Core" || s.Name == "CPU P-Core" || s.Name == "CPU S-Core" {
+			cat = s.Name
+		}
+		g, exists := groups[cat]
+		if !exists {
+			g = &tempGroup{min: s.Value, max: s.Value}
+			groups[cat] = g
+			order = append(order, cat)
+		}
+		g.sum += s.Value
+		g.count++
+		if s.Value < g.min {
+			g.min = s.Value
+		}
+		if s.Value > g.max {
+			g.max = s.Value
+		}
+	}
+
+	preferred := []string{"CPU E-Core", "CPU P-Core", "CPU S-Core", "CPU Core", "CPU Die", "GPU", "SoC Package", "Memory", "SSD", "NAND", "Ambient", "VRM", "Board", "Thunderbolt", "Wireless", "Display"}
+	var result []HeadlessTempGroup
+	seen := make(map[string]bool)
+	for _, name := range preferred {
+		if g, ok := groups[name]; ok {
+			result = append(result, newHeadlessTempGroup(name, g))
+			seen[name] = true
+		}
+	}
+	for _, name := range order {
+		if !seen[name] {
+			result = append(result, newHeadlessTempGroup(name, groups[name]))
+		}
+	}
+	return result
+}
+
+func newHeadlessTempGroup(name string, g *tempGroup) HeadlessTempGroup {
+	avg := math.Round(g.sum/float64(g.count)*10) / 10
+	return HeadlessTempGroup{
+		Group:   name,
+		Avg:     avg,
+		Min:     math.Round(g.min*10) / 10,
+		Max:     math.Round(g.max*10) / 10,
+		Sensors: g.count,
+	}
+}
+
+func buildHeadlessFans(fans []FanInfo) []HeadlessFan {
+	var result []HeadlessFan
+	for _, f := range fans {
+		mode := "auto"
+		if f.Mode == 1 {
+			mode = "manual"
+		}
+		result = append(result, HeadlessFan{
+			ID:        f.ID,
+			Name:      f.Name,
+			RPM:       f.ActualRPM,
+			TargetRPM: f.TargetRPM,
+			MinRPM:    f.MinRPM,
+			MaxRPM:    f.MaxRPM,
+			Mode:      mode,
+		})
+	}
+	return result
 }

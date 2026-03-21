@@ -29,16 +29,23 @@ typedef struct {
     int gpu_core_count;
     int e_core_count;
     int p_core_count;
+    int s_core_count;
     int ecluster_freq_mhz;
     double ecluster_active;
     int pcluster_freq_mhz;
     double pcluster_active;
+    int scluster_freq_mhz;
+    double scluster_active;
     double net_in_bytes_per_sec;
     double net_out_bytes_per_sec;
     double disk_read_kb_per_sec;
     double disk_write_kb_per_sec;
     double tflops_fp32;
     char rdma_status[64];
+    double dram_bw_combined_gbs;
+    int fan_count;
+    int fan_rpm[4];
+    char fan_name[4][32];
 } menubar_metrics_t;
 
 typedef struct {
@@ -286,6 +293,8 @@ func updateMenuBarFromPayload(p MenuBarMetricsPayload) {
 	cm.ecluster_freq_mhz = C.int(p.CPUMetrics.EClusterFreqMHz)
 	cm.pcluster_active = C.double(float64(p.CPUMetrics.PClusterActive))
 	cm.pcluster_freq_mhz = C.int(p.CPUMetrics.PClusterFreqMHz)
+	cm.scluster_active = C.double(float64(p.CPUMetrics.SClusterActive))
+	cm.scluster_freq_mhz = C.int(p.CPUMetrics.SClusterFreqMHz)
 
 	// Network/Disk
 	cm.net_in_bytes_per_sec = C.double(p.NetDiskMetrics.InBytesPerSec)
@@ -296,10 +305,14 @@ func updateMenuBarFromPayload(p MenuBarMetricsPayload) {
 	// TFLOPs
 	cm.tflops_fp32 = C.double(p.TFLOPs)
 
+	// DRAM Bandwidth
+	cm.dram_bw_combined_gbs = C.double(p.CPUMetrics.DRAMBWCombined)
+
 	// SysInfo Mapping
 	cm.gpu_core_count = C.int(p.SysInfo.GPUCoreCount)
 	cm.e_core_count = C.int(p.SysInfo.ECoreCount)
 	cm.p_core_count = C.int(p.SysInfo.PCoreCount)
+	cm.s_core_count = C.int(p.SysInfo.SCoreCount)
 
 	// Model Name
 	modelBytes := []byte(p.SysInfo.Name)
@@ -330,6 +343,24 @@ func updateMenuBarFromPayload(p MenuBarMetricsPayload) {
 		cm.rdma_status[i] = C.char(b)
 	}
 	cm.rdma_status[len(rdmaBytes)] = 0
+
+	// Fans
+	fanCount := len(p.CPUMetrics.Fans)
+	if fanCount > 4 {
+		fanCount = 4
+	}
+	cm.fan_count = C.int(fanCount)
+	for i := 0; i < fanCount; i++ {
+		cm.fan_rpm[i] = C.int(p.CPUMetrics.Fans[i].ActualRPM)
+		nameBytes := []byte(p.CPUMetrics.Fans[i].Name)
+		if len(nameBytes) > 31 {
+			nameBytes = nameBytes[:31]
+		}
+		for j, b := range nameBytes {
+			cm.fan_name[i][j] = C.char(b)
+		}
+		cm.fan_name[i][len(nameBytes)] = 0
+	}
 
 	C.updateMenuBarMetrics((*C.menubar_metrics_t)(unsafe.Pointer(&cm)))
 }

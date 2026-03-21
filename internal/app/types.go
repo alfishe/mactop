@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"image"
+	"strings"
 	"time"
 
 	ui "github.com/metaspartan/gotui/v5"
@@ -17,20 +18,27 @@ type CPUUsage struct {
 
 type CPUMetrics struct {
 	EClusterActive, EClusterFreqMHz, PClusterActive, PClusterFreqMHz int
-	ECores, PCores                                                   []int
+	SClusterActive, SClusterFreqMHz                                  int
+	ECores, PCores, SCores                                           []int
 	CoreMetrics                                                      map[string]int
 	ANEW, CPUW, GPUW, DRAMW, GPUSRAMW, PackageW, SystemW             float64
 	CoreUsages                                                       []float64
 	Throttled                                                        bool
 	CPUTemp                                                          float64
 	GPUTemp                                                          float64
+	DRAMReadBW                                                       float64
+	DRAMWriteBW                                                      float64
+	DRAMBWCombined                                                   float64
+	Fans                                                             []FanInfo
+	TempSensors                                                      []TempSensor
 }
 
 type SystemInfo struct {
 	Name         string `json:"name"`
 	CoreCount    int    `json:"core_count"`
-	ECoreCount   int    `json:"e_core_count"`
+	ECoreCount   int    `json:"e_core_count,omitempty"`
 	PCoreCount   int    `json:"p_core_count"`
+	SCoreCount   int    `json:"s_core_count,omitempty"`
 	GPUCoreCount int    `json:"gpu_core_count"`
 }
 
@@ -76,11 +84,11 @@ type EventThrottler struct {
 
 type CPUCoreWidget struct {
 	*ui.Block
-	cores                  []float64
-	labels                 []string
-	eCoreCount, pCoreCount int
-	modelName              string
-	cpuIndexMap            []int // maps display index -> hardware CPU index
+	cores                              []float64
+	labels                             []string
+	eCoreCount, pCoreCount, sCoreCount int
+	modelName                          string
+	cpuIndexMap                        []int // maps display index -> hardware CPU index
 }
 
 func NewEventThrottler(gracePeriod time.Duration) *EventThrottler {
@@ -96,6 +104,7 @@ func NewCPUMetrics() CPUMetrics {
 		CoreMetrics: make(map[string]int),
 		ECores:      make([]int, 0),
 		PCores:      make([]int, 0),
+		SCores:      make([]int, 0),
 	}
 }
 
@@ -117,26 +126,36 @@ func NewCPUCoreWidget(modelInfo SystemInfo) *CPUCoreWidget {
 	modelName := modelInfo.Name
 
 	// Use dynamic core topology detection from IORegistry
-	labels, eCount, pCount, cpuIndexMap := BuildCoreLabels()
+	labels, eCount, pCount, sCount, cpuIndexMap := BuildCoreLabels()
 
 	if labels == nil || len(labels) == 0 {
 		// Fallback to sysctl-based counts (old behavior)
 		eCoreCount := modelInfo.ECoreCount
 		pCoreCount := modelInfo.PCoreCount
-		totalCores := eCoreCount + pCoreCount
+		sCoreCount := modelInfo.SCoreCount
+		totalCores := eCoreCount + pCoreCount + sCoreCount
 
 		labels = make([]string, totalCores)
 		cpuIndexMap = make([]int, totalCores)
+		idx := 0
 		for i := range eCoreCount {
-			labels[i] = fmt.Sprintf("E%d", i)
-			cpuIndexMap[i] = i // 1:1 mapping for fallback
+			labels[idx] = fmt.Sprintf("E%d", i)
+			cpuIndexMap[idx] = idx
+			idx++
 		}
 		for i := range pCoreCount {
-			labels[i+eCoreCount] = fmt.Sprintf("P%d", i)
-			cpuIndexMap[i+eCoreCount] = i + eCoreCount
+			labels[idx] = fmt.Sprintf("P%d", i)
+			cpuIndexMap[idx] = idx
+			idx++
+		}
+		for i := range sCoreCount {
+			labels[idx] = fmt.Sprintf("S%d", i)
+			cpuIndexMap[idx] = idx
+			idx++
 		}
 		eCount = eCoreCount
 		pCount = pCoreCount
+		sCount = sCoreCount
 	}
 
 	totalCores := len(labels)
@@ -147,6 +166,7 @@ func NewCPUCoreWidget(modelInfo SystemInfo) *CPUCoreWidget {
 		labels:      labels,
 		eCoreCount:  eCount,
 		pCoreCount:  pCount,
+		sCoreCount:  sCount,
 		modelName:   modelName,
 		cpuIndexMap: cpuIndexMap,
 	}
@@ -290,4 +310,23 @@ func (w *CPUCoreWidget) Draw(buf *ui.Buffer) {
 
 		w.drawCore(buf, x, y, colWidths[col], actualIndex, w.cores[actualIndex], themeColor)
 	}
+}
+
+// FormatCoreSummary builds a dynamic core summary string like "(6E/4P)" or "(12P/6S)"
+// Only includes core types that have non-zero counts.
+func FormatCoreSummary(eCount, pCount, sCount int) string {
+	var parts []string
+	if eCount > 0 {
+		parts = append(parts, fmt.Sprintf("%dE", eCount))
+	}
+	if pCount > 0 {
+		parts = append(parts, fmt.Sprintf("%dP", pCount))
+	}
+	if sCount > 0 {
+		parts = append(parts, fmt.Sprintf("%dS", sCount))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "(" + strings.Join(parts, "/") + ")"
 }

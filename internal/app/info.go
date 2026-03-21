@@ -2,7 +2,9 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"sort"
 	"strings"
 
 	ui "github.com/metaspartan/gotui/v5"
@@ -81,6 +83,19 @@ func buildInfoLines(themeColor string) []string {
 		formatLine("Thermals", thermalStr),
 		formatLine("Network", fmt.Sprintf("↑ %s/s ↓ %s/s", formatBytes(lastNetDiskMetrics.OutBytesPerSec, networkUnit), formatBytes(lastNetDiskMetrics.InBytesPerSec, networkUnit))),
 		formatLine("Disk", fmt.Sprintf("R %s/s W %s/s", formatBytes(lastNetDiskMetrics.ReadKBytesPerSec*1024, diskUnit), formatBytes(lastNetDiskMetrics.WriteKBytesPerSec*1024, diskUnit))),
+		formatLine("DRAM BW", fmt.Sprintf("R %.1f / W %.1f / %.1f GB/s", lastCPUMetrics.DRAMReadBW, lastCPUMetrics.DRAMWriteBW, lastCPUMetrics.DRAMBWCombined)),
+	}
+
+	// Fan section
+	if len(lastCPUMetrics.Fans) > 0 {
+		infoLines = append(infoLines, "")
+		for _, fan := range lastCPUMetrics.Fans {
+			modeStr := "Auto"
+			if fan.Mode == 1 {
+				modeStr = "Manual"
+			}
+			infoLines = append(infoLines, formatLine(fan.Name, fmt.Sprintf("%d RPM (%s, %d-%d)", fan.ActualRPM, modeStr, fan.MinRPM, fan.MaxRPM)))
+		}
 	}
 
 	infoLines = append(infoLines, buildNetworkLinkLines(formatLine)...)
@@ -341,4 +356,310 @@ func renderInfoText(infoLines, asciiArt []string, layout infoLayout, themeColor 
 	}
 
 	return combinedText.String()
+}
+
+func fanRPMBar(fan FanInfo, themeColor string) []string {
+	modeStr := "Auto"
+	modeColor := "green"
+	if fan.Mode == 1 {
+		modeStr = "Manual"
+		modeColor = "yellow"
+	}
+
+	pct := 0.0
+	if fan.MaxRPM > 0 {
+		pct = float64(fan.ActualRPM) / float64(fan.MaxRPM) * 100.0
+	}
+
+	barWidth := 20
+	filled := int(pct / 100.0 * float64(barWidth))
+	if filled > barWidth {
+		filled = barWidth
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+
+	rpmColor := themeColor
+	if pct > 80 {
+		rpmColor = "red"
+	} else if pct > 50 {
+		rpmColor = "yellow"
+	}
+
+	return []string{
+		fmt.Sprintf("[%s](fg:%s,mod:bold)  [%s](fg:%s) [%4d](fg:%s,mod:bold) / %d RPM  [%s](fg:%s)",
+			fan.Name, themeColor, bar, rpmColor, fan.ActualRPM, rpmColor, fan.MaxRPM, modeStr, modeColor),
+		fmt.Sprintf("    Target: %d RPM  |  Range: %d – %d RPM",
+			fan.TargetRPM, fan.MinRPM, fan.MaxRPM),
+	}
+}
+
+// sensorGroupMap maps SMC key second character to group category.
+var sensorGroupMap = map[byte]string{
+	'p': "CPU P-Core", 'e': "CPU E-Core", 'f': "CPU P-Core",
+	'g': "GPU", 'C': "CPU Core", 'c': "CPU Core",
+	'm': "Memory", 'M': "Memory", 's': "SSD", 'S': "SSD",
+	'H': "NAND", 'N': "NAND",
+	'a': "Ambient", 'A': "Ambient", 'F': "Ambient",
+	'B': "Board", 'b': "Board",
+	'V': "VRM", 'P': "SoC Package", 'R': "GPU",
+	'T': "Thunderbolt", 'I': "Thunderbolt",
+	'w': "Wireless", 'W': "Wireless",
+	'D': "Display", 'd': "Display", 'L': "Display",
+}
+
+// sensorGroupName returns the group category for a sensor based on its SMC key.
+func sensorGroupName(key string) string {
+	if len(key) < 2 || key[0] != 'T' {
+		return "Other"
+	}
+	// Multi-char prefix matching for Apple Silicon specifics
+	if len(key) >= 3 {
+		if (key[1] == 'P' && (key[2] == 'D' || key[2] == 'M' || key[2] == 'S')) || key[1] == 'R' && key[2] == 'D' {
+			if key[1] == 'R' {
+				return "GPU"
+			}
+			return "SoC Package"
+		}
+		if key[1] == 'C' && (key[2] == 'M' || key[2] == 'D') {
+			return "CPU Die"
+		}
+	}
+	if group, ok := sensorGroupMap[key[1]]; ok {
+		return group
+	}
+	return "Other"
+}
+
+// classifyCPUCoreSensors splits generic "CPU Core" sensors into E-Core, P-Core,
+// and S-Core categories using known core counts.
+func classifyCPUCoreSensors(sensors []TempSensor, sysInfo SystemInfo) []TempSensor {
+	eCount := sysInfo.ECoreCount
+	pCount := sysInfo.PCoreCount
+	sCount := sysInfo.SCoreCount
+	totalCores := eCount + pCount + sCount
+	if totalCores == 0 {
+		return sensors
+	}
+
+	// Collect indices of generic "CPU Core" sensors (by key-based group)
+	var cpuIndices []int
+	for i, s := range sensors {
+		group := sensorGroupName(s.Key)
+		if group == "CPU Core" {
+			cpuIndices = append(cpuIndices, i)
+		}
+	}
+	if len(cpuIndices) == 0 {
+		return sensors
+	}
+
+	// Sort indices by key to get cluster order (E-cores first per die)
+	sort.Slice(cpuIndices, func(a, b int) bool {
+		return sensors[cpuIndices[a]].Key < sensors[cpuIndices[b]].Key
+	})
+
+	// Split by core ratio
+	n := len(cpuIndices)
+	eSensors := int(math.Round(float64(n) * float64(eCount) / float64(totalCores)))
+	pSensors := int(math.Round(float64(n) * float64(pCount) / float64(totalCores)))
+
+	result := make([]TempSensor, len(sensors))
+	copy(result, sensors)
+
+	for i, idx := range cpuIndices {
+		if i < eSensors {
+			result[idx].Name = "CPU E-Core"
+		} else if i < eSensors+pSensors {
+			result[idx].Name = "CPU P-Core"
+		} else {
+			result[idx].Name = "CPU S-Core"
+		}
+	}
+	return result
+}
+
+func buildGroupedTempLines(sensors []TempSensor, themeColor string) []string {
+	// Classify generic CPU Core sensors into E/P/S before grouping
+	sensors = classifyCPUCoreSensors(sensors, cachedSystemInfo)
+
+	// Group sensors by category (using key-based group name for proper merging)
+	groups := make(map[string]*tempGroup)
+	var groupOrder []string
+	for _, s := range sensors {
+		cat := sensorGroupName(s.Key)
+		// For classified CPU sensors, use the reclassified Name
+		if strings.HasPrefix(s.Name, "CPU E-Core") || strings.HasPrefix(s.Name, "CPU P-Core") || strings.HasPrefix(s.Name, "CPU S-Core") {
+			cat = s.Name
+		}
+		g, exists := groups[cat]
+		if !exists {
+			g = &tempGroup{min: s.Value, max: s.Value}
+			groups[cat] = g
+			groupOrder = append(groupOrder, cat)
+		}
+		g.sum += s.Value
+		g.count++
+		if s.Value < g.min {
+			g.min = s.Value
+		}
+		if s.Value > g.max {
+			g.max = s.Value
+		}
+	}
+
+	// Preferred display order — most important first
+	preferred := []string{
+		"CPU E-Core", "CPU P-Core", "CPU S-Core", "CPU Core", "CPU Die",
+		"GPU", "SoC Package", "Memory", "SSD", "NAND",
+		"Ambient", "VRM", "Board", "Thunderbolt",
+		"Wireless", "Display",
+	}
+
+	var ordered []string
+	seen := make(map[string]bool)
+	for _, name := range preferred {
+		if _, exists := groups[name]; exists {
+			ordered = append(ordered, name)
+			seen[name] = true
+		}
+	}
+	// Append any remaining groups not in preferred order
+	for _, name := range groupOrder {
+		if !seen[name] {
+			ordered = append(ordered, name)
+		}
+	}
+
+	var lines []string
+	for _, cat := range ordered {
+		g := groups[cat]
+		lines = append(lines, formatTempGroupLine(cat, g, themeColor))
+	}
+	return lines
+}
+
+type tempGroup struct {
+	sum   float64
+	count int
+	min   float64
+	max   float64
+}
+
+func formatTempGroupLine(cat string, g *tempGroup, themeColor string) string {
+	avg := g.sum / float64(g.count)
+	tempColor := themeColor
+	if avg > 90 {
+		tempColor = "red"
+	} else if avg > 70 {
+		tempColor = "yellow"
+	}
+	if g.count == 1 {
+		return fmt.Sprintf("  [%-16s](fg:%s)  [%s](fg:%s)",
+			cat, themeColor, formatTemp(avg), tempColor)
+	}
+	return fmt.Sprintf("  [%-16s](fg:%s)  [%s](fg:%s)  [avg of %d, %s – %s](fg:%s)",
+		cat, themeColor, formatTemp(avg), tempColor,
+		g.count, formatTemp(g.min), formatTemp(g.max), themeColor)
+}
+
+func renderScrollableLines(lines []string, themeColor string) string {
+	_, termHeight := ui.TerminalDimensions()
+	availableHeight := termHeight - 6
+	if availableHeight < 5 {
+		availableHeight = 5
+	}
+	totalLines := len(lines)
+
+	maxScroll := totalLines - availableHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if infoScrollOffset > maxScroll {
+		infoScrollOffset = maxScroll
+	}
+	if infoScrollOffset < 0 {
+		infoScrollOffset = 0
+	}
+
+	startLine := infoScrollOffset
+	endLine := min(startLine+availableHeight, totalLines)
+
+	paddingStr := "  "
+
+	var result strings.Builder
+	result.WriteString("\n")
+
+	if infoScrollOffset > 0 {
+		fmt.Fprintf(&result, "%s[↑ Scroll up (k/↑)](fg:%s)\n", paddingStr, themeColor)
+	}
+	for i := startLine; i < endLine; i++ {
+		fmt.Fprintf(&result, "%s%s\n", paddingStr, lines[i])
+	}
+	if endLine < totalLines {
+		fmt.Fprintf(&result, "%s[↓ Scroll down (j/↓)](fg:%s)\n", paddingStr, themeColor)
+	}
+
+	return result.String()
+}
+
+// buildFanStatusText renders the fan RPM panel content
+func buildFanStatusText(themeColor string) string {
+	formatLine := func(label, value string) string {
+		paddedLabel := fmt.Sprintf("%-16s", label)
+		return fmt.Sprintf("[%s](fg:%s,mod:bold): [%s](fg:%s)", paddedLabel, themeColor, value, themeColor)
+	}
+
+	var lines []string
+
+	// Thermal state
+	thermalStr, _ := getThermalStateString()
+	if lastCPUMetrics.CPUTemp > 0 {
+		thermalStr = fmt.Sprintf("%s (%s)", thermalStr, formatTemp(lastCPUMetrics.CPUTemp))
+	}
+	lines = append(lines, fmt.Sprintf("[Thermal State](fg:%s,mod:bold): [%s](fg:%s)", themeColor, thermalStr, themeColor))
+	lines = append(lines, "")
+
+	// CPU/GPU quick temps
+	if lastCPUMetrics.CPUTemp > 0 {
+		lines = append(lines, formatLine("CPU Temp", formatTemp(lastCPUMetrics.CPUTemp)))
+	}
+	if lastCPUMetrics.GPUTemp > 0 {
+		lines = append(lines, formatLine("GPU Temp", formatTemp(lastCPUMetrics.GPUTemp)))
+	}
+	lines = append(lines, "")
+
+	// Fan RPM bars
+	if len(lastCPUMetrics.Fans) > 0 {
+		for _, fan := range lastCPUMetrics.Fans {
+			lines = append(lines, fanRPMBar(fan, themeColor)...)
+			lines = append(lines, "")
+		}
+	} else {
+		lines = append(lines, fmt.Sprintf("[No fans detected](fg:%s)", themeColor))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// buildFanTempText renders the grouped/averaged temperature sensor panel
+func buildFanTempText(themeColor string) string {
+	var lines []string
+
+	if len(lastCPUMetrics.TempSensors) > 0 {
+		lines = append(lines, buildGroupedTempLines(lastCPUMetrics.TempSensors, themeColor)...)
+	} else {
+		lines = append(lines, fmt.Sprintf("[No temperature sensors detected](fg:%s)", themeColor))
+	}
+
+	return renderScrollableLines(lines, themeColor)
+}
+
+// buildFanControlText renders a compact single-line status bar
+func buildFanControlText(themeColor string) string {
+	if fanControl {
+		return fmt.Sprintf("[⚠ FAN CONTROL ACTIVE](fg:red,mod:bold)  [+/-](fg:%s,mod:bold) Speed  [a](fg:%s,mod:bold) Auto  [0/9](fg:%s,mod:bold) Min/Max  [R](fg:green,mod:bold) Reset  [l](fg:%s) Layout  [F](fg:%s) Exit",
+			themeColor, themeColor, themeColor, themeColor, themeColor)
+	}
+	return fmt.Sprintf("[Read-only](fg:%s)  Use --fan-control to enable writes  |  [l](fg:%s,mod:bold) Layout  [F](fg:%s,mod:bold) Exit fan view",
+		themeColor, themeColor, themeColor)
 }

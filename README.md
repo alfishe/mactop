@@ -22,7 +22,12 @@
 - Real-time CPU, GPU, ANE, DRAM, and system power wattage usage display
 - GPU frequency and usage percentage display
 - CPU and GPU temperatures + Thermal State
-- Detailed native metrics for CPU cores (E and P cores) via Apple's Mach Kernel API
+- **M5 Super Core (S-Core) Support**: Full support for Apple M5's new CPU architecture (E-cores, P-cores, S-cores)
+- **DRAM Bandwidth Monitoring**: Real-time DRAM read/write bandwidth (GB/s) — uses auto-calibrated power-based estimation on M5+ chips (no sudo required)
+- **Comprehensive Temperature Sensors**: All available SMC temperature sensors (CPU Die, GPU, Memory, SSD, Airflow, and more) with human-readable labels
+- **Fan Monitoring**: Real-time fan RPM, target speed, mode (Auto/Manual), and visual RPM bars
+- **Fan Speed Control**: Optional interactive fan speed control via `--fan-control` flag (writes to SMC)
+- Detailed native metrics for CPU cores (E-cores, P-cores, and S-cores on M5+) via Apple's Mach Kernel API
 - Memory usage and swap information
 - Network usage information (upload/download speeds)
 - **Thunderbolt bandwidth monitoring**: Real-time throughput for Thunderbolt Bridge interfaces
@@ -32,7 +37,7 @@
 - Proportional per process GPU usage (experimental)
 - Multiple volume display (shows Mac HD + mounted external volumes)
 - Easy-to-read terminal UI
-- **17 Layouts**: (`l` to cycle layouts)
+- **18 Layouts**: (`l` to cycle layouts)
 - **Persistent Settings**: Remembers your Layout and Theme choice across restarts
 - Customizable UI color (green, red, blue, skyblue, magenta, yellow, gold, silver, white, lime, orange, violet, pink, and more) (`c` to cycle colors)
 - Customizable background color (`b` to cycle colors)
@@ -47,6 +52,8 @@
 - **Freeze**: Pause/Resume process list updates (`f`)
 - Party Mode (Randomly cycles through colors) (`p` to toggle)
 - Optional Prometheus Metrics server (default is disabled) (`-p <port>` or `--prometheus <port>`)
+  - Exports: CPU/GPU/ANE usage, E/P/S-core averages, per-core usage (labeled by type), power components, DRAM bandwidth (read/write/combined), memory, network, disk, fan RPM, temperature sensors, thermal state, and more
+- **macOS Menu Bar Mode**: Run as a native menu bar status item (`--menubar`) with sparkline charts, CPU/GPU/Memory gauges, power metrics, DRAM bandwidth, fan RPM, and full system stats
 - Support for all Apple Silicon models
 - **Auto-detect Light/Dark Mode**: Automatically adjusts UI colors based on your terminal's background color or system theme.
 - **Configurable Units**: Customize units for network, disk, and temperature display (`--unit-network`, `--unit-disk`, `--unit-temp`)
@@ -145,6 +152,7 @@ mactop --headless --format toon
 - `--unit-network`: Network unit: auto, byte, kb, mb, gb (default: auto)
 - `--unit-disk`: Disk unit: auto, byte, kb, mb, gb (default: auto)
 - `--unit-temp`: Temperature unit: celsius, fahrenheit (default: celsius)
+- `--fan-control`: Enable interactive fan speed control (**⚠️ writes to SMC** — use with caution, may require sudo on some macOS versions)
 - `--test` or `-t`: Test IOReport power metrics (no sudo required)
 - `--menubar`: Run as a macOS menu bar status item alongside the TUI.
 - `--version` or `-v`: Print the version of mactop.
@@ -224,7 +232,8 @@ Use the following keys to interact with the application while its running:
 - `b`: Cycle through the background colors.
 - `p`: Party Mode (Randomly cycles through colors)
 - `i`: Toggle Info layout (displays system info)
-- `l`: Cycle through the 17 available layouts.
+- `F` (Shift+f): Toggle Fan & Thermals layout (fan monitoring + all temperature sensors)
+- `l`: Cycle through the 18 available layouts.
 - `+` or `=`: Increase update interval (slower updates).
 - `-`: Decrease update interval (faster updates).
 - `F9`: Kill the currently selected process (pauses updates while selecting).
@@ -233,6 +242,15 @@ Use the following keys to interact with the application while its running:
 - `/`: Search/Filter the process list by name (Esc to clear).
 - `Enter` or `Space`: Sort by the selected column.
 - `h` or `?`: Toggle the help menu.
+
+### Fan Control Keys (requires `--fan-control` flag, only active in Fan layout)
+
+- `+` or `=`: Increase fan speed (+100 RPM)
+- `-`: Decrease fan speed (-100 RPM)
+- `a`: Toggle auto/manual fan mode
+- `0`: Set all fans to minimum speed
+- `9`: Set all fans to maximum speed
+- `R` (Shift+r): Reset all fans to automatic control
 
 ## Example Theme (Green) Screenshot (mactop -c green) on Advanced layout (Hit "l" key to toggle)
 
@@ -447,7 +465,7 @@ Use the following keys to interact with the application while its running:
 ]
 ```
 
-## Confirmed tested working M series chips
+## Confirmed tested working Apple Silicon chips
 
 - M1
 - M1 Pro
@@ -464,9 +482,12 @@ Use the following keys to interact with the application while its running:
 - M4
 - M4 Pro
 - M4 Max
+- A18 Pro
 - M5
+- M5 Pro
+- M5 Max
 
-(If you have a confirmed working M series chip that is not listed, please open an issue, so we may add it here!)
+(If you have a confirmed working Apple Silicon chip that is not listed, please open an issue, so we may add it here!)
 
 ## Contributing
 
@@ -480,12 +501,12 @@ Contributions are what make the open-source community such an amazing place to l
 
 ## What does mactop use to get real-time data?
 
-- **Apple SMC**: For SoC temperature sensors and System Power (PSTR)
-- **IOReport API**: For CPU, GPU, ANE, and DRAM power consumption (no sudo required)
+- **Apple SMC**: For SoC temperature sensors, System Power (PSTR), fan speed monitoring (FNum, F*Ac/Mn/Mx/Tg/Md), fan speed control via SMCWrite, and comprehensive temperature sensor enumeration
+- **IOReport API**: For CPU, GPU, ANE, and DRAM power consumption (no sudo required) — DRAM power is also used for auto-calibrated bandwidth estimation on M5+ chips
 - **IOKit**: For GPU frequency table from `pmgr` device
 - **IOHIDEventSystemClient**: Fallback for SoC temperature sensors
 - **NSProcessInfo.thermalState**: For system thermal state (Nominal/Fair/Serious/Critical)
-- **Mach Kernel API** (`host_processor_info`): For CPU metrics (E and P cores) via CGO
+- **Mach Kernel API** (`host_processor_info`): For CPU metrics (E-cores, P-cores, and S-cores on M5+) via CGO
 
 ## License
 

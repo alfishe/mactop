@@ -135,6 +135,8 @@ func handleModeKeys(key string, done chan struct{}) {
 		handleBackgroundCycle()
 	case "f":
 		toggleFreeze()
+	case "F":
+		toggleFanLayout()
 	}
 }
 
@@ -210,33 +212,55 @@ func handleKeyboardEvent(e ui.Event, done chan struct{}) {
 	renderMutex.Unlock()
 
 	switch key {
-	case "q", "<C-c>", "r", "p", "c", "l", "h", "?", "i", "b", "f":
+	case "q", "<C-c>", "r", "p", "c", "l", "h", "?", "i", "b", "f", "F":
 		handleModeKeys(key, done)
 	case "-", "_", "+", "=":
-		handleIntervalKeys(key)
+		if !handleFanControlKeys(key) {
+			handleIntervalKeys(key)
+		}
+	case "a", "A", "0", "9", "R":
+		handleFanControlKeys(key)
 	case "j", "<Down>":
-		// Scroll down in Info layout
-		if currentConfig.DefaultLayout == LayoutInfo {
-			renderMutex.Lock()
-			infoScrollOffset++
-			updateInfoUI()
-			w, h := ui.TerminalDimensions()
-			drawScreen(w, h)
-			renderMutex.Unlock()
-		}
+		handleInfoFanScroll(1)
 	case "k", "<Up>":
-		// Scroll up in Info layout
-		if currentConfig.DefaultLayout == LayoutInfo {
-			renderMutex.Lock()
-			if infoScrollOffset > 0 {
-				infoScrollOffset--
-			}
-			updateInfoUI()
-			w, h := ui.TerminalDimensions()
-			drawScreen(w, h)
-			renderMutex.Unlock()
-		}
+		handleInfoFanScroll(-1)
 	}
+}
+
+func handleFanControlKeys(key string) bool {
+	if !fanControl || currentConfig.DefaultLayout != LayoutFan {
+		return false
+	}
+	switch key {
+	case "+", "=", "-", "_":
+		handleFanSpeedAdjust(key)
+	case "a", "A":
+		handleFanAutoToggle()
+	case "0":
+		handleFanSetMin()
+	case "9":
+		handleFanSetMax()
+	case "R":
+		handleFanResetAuto()
+	default:
+		return false
+	}
+	return true
+}
+
+func handleInfoFanScroll(direction int) {
+	if currentConfig.DefaultLayout != LayoutInfo && currentConfig.DefaultLayout != LayoutFan {
+		return
+	}
+	renderMutex.Lock()
+	infoScrollOffset += direction
+	if infoScrollOffset < 0 {
+		infoScrollOffset = 0
+	}
+	updateInfoUI()
+	w, h := ui.TerminalDimensions()
+	drawScreen(w, h)
+	renderMutex.Unlock()
 }
 
 func handleGenericMouseEvent(e ui.Event) {
@@ -258,8 +282,8 @@ func handleGenericMouseEvent(e ui.Event) {
 		return
 	}
 
-	// Handle mouse wheel scrolling in Info layout
-	if currentConfig.DefaultLayout == LayoutInfo {
+	// Handle mouse wheel scrolling in Info or Fan layout
+	if currentConfig.DefaultLayout == LayoutInfo || currentConfig.DefaultLayout == LayoutFan {
 		switch e.ID {
 		case "<MouseWheelUp>":
 			if infoScrollOffset > 0 {

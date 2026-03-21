@@ -12,11 +12,12 @@ import (
 )
 
 var (
-	version                                                     = "v2.0.9"
+	version                                                     = "v2.1.0"
 	cpuGauge, gpuGauge, memoryGauge, aneGauge                   *w.Gauge
 	mainBlock                                                   *ui.Block
 	modelText, PowerChart, NetworkInfo, helpText, infoParagraph *w.Paragraph
 	tbInfoParagraph                                             *w.Paragraph
+	fanStatusPanel, fanTempPanel, fanControlPanel               *w.Paragraph
 	grid                                                        *ui.Grid
 	processList                                                 *w.List
 	// Search state
@@ -66,7 +67,9 @@ var (
 	headlessCount  int
 	headlessFormat string
 	menubar        bool   // Run as menu bar status item
+	filterPID      int    // Monitor a specific process by PID (0 = all)
 	cliBgColor     string // Background color from --bg flag
+	fanControl     bool   // Enable interactive fan speed control (requires --fan-control flag)
 	interruptChan  = make(chan struct{}, 10)
 
 	cachedTermWidth    int
@@ -144,6 +147,13 @@ var (
 		},
 	)
 
+	scoreUsage = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "mactop_score_usage_percent",
+			Help: "Current S-core (Super) CPU usage percentage",
+		},
+	)
+
 	gpuUsage = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "mactop_gpu_usage_percent",
@@ -171,11 +181,10 @@ var (
 			Help: "Current SoC temperature in Celsius",
 		},
 	)
-	gpuTemp = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "mactop_gpu_temperature_celsius",
-		Help: "Current GPU temperature in Celsius",
-	})
-	thermalState = prometheus.NewGauge(prometheus.GaugeOpts{
+	gpuTemp         = prometheus.NewGauge(prometheus.GaugeOpts{Name: "mactop_gpu_temp_celsius", Help: "GPU temperature in Celsius"})
+	fanRPM          = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "mactop_fan_rpm", Help: "Fan speed in RPM"}, []string{"fan_id", "fan_name"})
+	tempSensorGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "mactop_temp_sensor_celsius", Help: "Temperature sensor reading in Celsius"}, []string{"key", "name"})
+	thermalState    = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "mactop_thermal_state",
 		Help: "Current thermal state (0=Nominal, 1=Fair, 2=Serious, 3=Critical)",
 	},
@@ -230,6 +239,14 @@ var (
 		},
 	)
 
+	dramBandwidth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "mactop_dram_bandwidth_gbs",
+			Help: "DRAM bandwidth in GB/s",
+		},
+		[]string{"direction"},
+	)
+
 	// Per-core CPU usage metrics
 	cpuCoreUsage = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -245,6 +262,6 @@ var (
 			Name: "mactop_system_info",
 			Help: "System information (value is always 1, labels contain info)",
 		},
-		[]string{"model", "core_count", "e_core_count", "p_core_count", "gpu_core_count"},
+		[]string{"model", "core_count", "e_core_count", "p_core_count", "s_core_count", "gpu_core_count"},
 	)
 )

@@ -34,16 +34,23 @@ typedef struct {
   int gpu_core_count;
   int e_core_count;
   int p_core_count;
+  int s_core_count;
   int ecluster_freq_mhz;
   double ecluster_active;
   int pcluster_freq_mhz;
   double pcluster_active;
+  int scluster_freq_mhz;
+  double scluster_active;
   double net_in_bytes_per_sec;
   double net_out_bytes_per_sec;
   double disk_read_kb_per_sec;
   double disk_write_kb_per_sec;
   double tflops_fp32;
   char rdma_status[64];
+  double dram_bw_combined_gbs;
+  int fan_count;
+  int fan_rpm[4];
+  char fan_name[4][32];
 } menubar_metrics_t;
 
 // Config passed from Go
@@ -166,11 +173,9 @@ static NSColor *memColor(void) {
   return c ?: [NSColor systemPurpleColor];
 }
 
-static NSColor *labelDimColor(void) {
-  return [NSColor colorWithWhite:0.55 alpha:1.0];
-}
-static NSColor *valueColor(void) { return [NSColor whiteColor]; }
-static NSColor *headerColor(void) { return [NSColor whiteColor]; }
+static NSColor *labelDimColor(void) { return [NSColor secondaryLabelColor]; }
+static NSColor *valueColor(void) { return [NSColor labelColor]; }
+static NSColor *headerColor(void) { return [NSColor labelColor]; }
 
 // ---- Settings Window Controller & Delegate Forward Declarations ----
 
@@ -286,6 +291,7 @@ static NSColor *headerColor(void) { return [NSColor whiteColor]; }
 @property(strong, nonatomic) NSMenuItem *cpuUsageItem;
 @property(strong, nonatomic) NSMenuItem *cpuEClusterItem;
 @property(strong, nonatomic) NSMenuItem *cpuPClusterItem;
+@property(strong, nonatomic) NSMenuItem *cpuSClusterItem;
 @property(strong, nonatomic) NSMenuItem *cpuWattsItem;
 @property(strong, nonatomic) NSMenuItem *cpuTempItem;
 @property(strong, nonatomic) NSMenuItem *gpuUsageItem;
@@ -294,6 +300,7 @@ static NSColor *headerColor(void) { return [NSColor whiteColor]; }
 @property(strong, nonatomic) NSMenuItem *gpuTflopsItem;
 @property(strong, nonatomic) NSMenuItem *memUsageItem;
 @property(strong, nonatomic) NSMenuItem *memSwapItem;
+@property(strong, nonatomic) NSMenuItem *dramBwItem;
 @property(strong, nonatomic) NSMenuItem *netItem;
 @property(strong, nonatomic) NSMenuItem *rdmaItem;
 @property(strong, nonatomic) NSMenuItem *diskItem;
@@ -308,6 +315,12 @@ static NSColor *headerColor(void) { return [NSColor whiteColor]; }
 @property(strong, nonatomic) NSMenuItem *gpuSparkItem;
 @property(strong, nonatomic) NSMenuItem *aneSparkItem;
 @property(strong, nonatomic) NSMenuItem *memSparkItem;
+@property(strong, nonatomic) NSMenuItem *fanHeaderItem;
+@property(strong, nonatomic) NSMenuItem *fan0Item;
+@property(strong, nonatomic) NSMenuItem *fan1Item;
+@property(strong, nonatomic) NSMenuItem *fan2Item;
+@property(strong, nonatomic) NSMenuItem *fan3Item;
+@property(strong, nonatomic) NSMenuItem *fanSepItem;
 - (void)performMetricUpdate:(NSValue *)val;
 - (void)openSettings:(id)sender;
 - (void)statusBarClicked:(id)sender;
@@ -705,7 +718,7 @@ static NSMenuItem *makeBrandingItem(void) {
                                            systemFontOfSize:14
                                                      weight:NSFontWeightHeavy],
                                        NSForegroundColorAttributeName :
-                                           [NSColor whiteColor],
+                                           [NSColor labelColor],
                                        NSParagraphStyleAttributeName : style
                                      }]];
   field.attributedStringValue = as;
@@ -730,7 +743,7 @@ static void drawHBar(NSString *label, double pct, NSColor *color, CGFloat x,
                                                 weight:NSFontWeightBold];
   NSDictionary *la = @{
     NSFontAttributeName : lf,
-    NSForegroundColorAttributeName : [NSColor whiteColor]
+    NSForegroundColorAttributeName : [NSColor labelColor]
   };
   NSSize ls = [label sizeWithAttributes:la];
   CGFloat labelW = ls.width + 4;
@@ -741,7 +754,7 @@ static void drawHBar(NSString *label, double pct, NSColor *color, CGFloat x,
 
   CGFloat bx = x + labelW;
 
-  [[NSColor colorWithWhite:1.0 alpha:0.15] set];
+  [[NSColor colorWithWhite:0.5 alpha:0.2] set];
   NSBezierPath *track =
       [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(bx, barY, barW, barH)
                                       xRadius:2
@@ -762,7 +775,7 @@ static void drawHBar(NSString *label, double pct, NSColor *color, CGFloat x,
                                                   weight:NSFontWeightRegular];
     NSDictionary *pa = @{
       NSFontAttributeName : pf,
-      NSForegroundColorAttributeName : [NSColor whiteColor]
+      NSForegroundColorAttributeName : [NSColor labelColor]
     };
     NSString *pStr = [NSString stringWithFormat:@"%.0f%%", pct];
     CGFloat px = bx + barW + 4;
@@ -818,7 +831,7 @@ static NSImage *drawStatusBarImage(double cpu, double gpu, double ane,
                                                   weight:NSFontWeightMedium];
     wattAttrs = @{
       NSFontAttributeName : pf,
-      NSForegroundColorAttributeName : [NSColor whiteColor]
+      NSForegroundColorAttributeName : [NSColor labelColor]
     };
     textW = [wattStr sizeWithAttributes:wattAttrs].width;
   }
@@ -932,7 +945,7 @@ static NSImage *drawSparklineChart(double *history, int count, NSColor *color,
                                                      weight:NSFontWeightBold];
   NSDictionary *valAttrs = @{
     NSFontAttributeName : valFont,
-    NSForegroundColorAttributeName : [NSColor whiteColor]
+    NSForegroundColorAttributeName : [NSColor labelColor]
   };
   NSSize valSize = [valStr sizeWithAttributes:valAttrs];
   [valStr drawAtPoint:NSMakePoint(w - padR - valSize.width - 2, h - padT + 2)
@@ -1008,6 +1021,10 @@ static void buildMenu(void) {
     [menu addItem:g_delegate.cpuEClusterItem];
     g_delegate.cpuPClusterItem = makeMetricItem(@"P-Cluster:", @"\u2014");
     [menu addItem:g_delegate.cpuPClusterItem];
+    g_delegate.cpuSClusterItem = makeMetricItem(@"S-Cluster:", @"\u2014");
+    [menu addItem:g_delegate.cpuSClusterItem];
+    g_delegate.cpuSClusterItem.hidden =
+        YES; // Hidden until S-cluster data arrives
     g_delegate.cpuWattsItem = makeMetricItem(@"Power:", @"\u2014");
     [menu addItem:g_delegate.cpuWattsItem];
     g_delegate.cpuTempItem = makeMetricItem(@"Temp:", @"\u2014");
@@ -1030,6 +1047,8 @@ static void buildMenu(void) {
     [menu addItem:g_delegate.memUsageItem];
     g_delegate.memSwapItem = makeMetricItem(@"Swap:", @"\u2014");
     [menu addItem:g_delegate.memSwapItem];
+    g_delegate.dramBwItem = makeMetricItem(@"DRAM BW:", @"\u2014");
+    [menu addItem:g_delegate.dramBwItem];
     [menu addItem:[NSMenuItem separatorItem]];
 
     [menu addItem:makeHeaderItem(@"NETWORK")];
@@ -1080,6 +1099,19 @@ static void buildMenu(void) {
     g_delegate.memSparkItem = makeSparkItem(emptySparkMEM);
     [menu addItem:g_delegate.memSparkItem];
     [menu addItem:[NSMenuItem separatorItem]];
+
+    g_delegate.fanHeaderItem = makeHeaderItem(@"FANS");
+    [menu addItem:g_delegate.fanHeaderItem];
+    g_delegate.fan0Item = makeMetricItem(@"Fan 0:", @"\u2014");
+    [menu addItem:g_delegate.fan0Item];
+    g_delegate.fan1Item = makeMetricItem(@"Fan 1:", @"\u2014");
+    [menu addItem:g_delegate.fan1Item];
+    g_delegate.fan2Item = makeMetricItem(@"Fan 2:", @"\u2014");
+    [menu addItem:g_delegate.fan2Item];
+    g_delegate.fan3Item = makeMetricItem(@"Fan 3:", @"\u2014");
+    [menu addItem:g_delegate.fan3Item];
+    g_delegate.fanSepItem = [NSMenuItem separatorItem];
+    [menu addItem:g_delegate.fanSepItem];
 
     NSMenuItem *settingsItem =
         [[NSMenuItem alloc] initWithTitle:@"Settings\u2026"
@@ -1231,25 +1263,49 @@ void cleanupMenuBar(void) {
 
     // Update menu views...
     MactopLabelView *mv = (MactopLabelView *)self.modelItem.view;
+    // Build dynamic core summary — only show core types with non-zero counts
+    NSMutableString *coreStr = [NSMutableString string];
+    if (metrics.e_core_count > 0) {
+      [coreStr appendFormat:@"%dE + ", metrics.e_core_count];
+    }
+    [coreStr appendFormat:@"%dP", metrics.p_core_count];
+    if (metrics.s_core_count > 0) {
+      [coreStr appendFormat:@" + %dS", metrics.s_core_count];
+    }
+    [coreStr appendFormat:@" + %dGPU", metrics.gpu_core_count];
     mv.label.stringValue = [NSString
-        stringWithFormat:@"%s  (%dE + %dP + %dGPU)", metrics.model_name,
-                         metrics.e_core_count, metrics.p_core_count,
-                         metrics.gpu_core_count];
+        stringWithFormat:@"%s  (%@)", metrics.model_name, coreStr];
 
     MactopMetricView *v = (MactopMetricView *)self.cpuUsageItem.view;
     [v setTwoToneLabel:@"Usage:"
                  value:[NSString
                            stringWithFormat:@"%.1f%%", metrics.cpu_percent]];
-    v = (MactopMetricView *)self.cpuEClusterItem.view;
-    [v setTwoToneLabel:@"E-Cluster:"
-                 value:[NSString stringWithFormat:@"%d MHz (%.1f%%)",
-                                                  metrics.ecluster_freq_mhz,
-                                                  metrics.ecluster_active]];
+    // E-Cluster: hide when e_core_count is 0 (M5+ has no E-cores)
+    if (metrics.e_core_count > 0) {
+      self.cpuEClusterItem.hidden = NO;
+      v = (MactopMetricView *)self.cpuEClusterItem.view;
+      [v setTwoToneLabel:@"E-Cluster:"
+                   value:[NSString stringWithFormat:@"%d MHz (%.1f%%)",
+                                                    metrics.ecluster_freq_mhz,
+                                                    metrics.ecluster_active]];
+    } else {
+      self.cpuEClusterItem.hidden = YES;
+    }
     v = (MactopMetricView *)self.cpuPClusterItem.view;
     [v setTwoToneLabel:@"P-Cluster:"
                  value:[NSString stringWithFormat:@"%d MHz (%.1f%%)",
                                                   metrics.pcluster_freq_mhz,
                                                   metrics.pcluster_active]];
+
+    // S-Cluster: only show when data is present (M5+)
+    if (metrics.scluster_freq_mhz > 0 || metrics.scluster_active > 0) {
+      self.cpuSClusterItem.hidden = NO;
+      v = (MactopMetricView *)self.cpuSClusterItem.view;
+      [v setTwoToneLabel:@"S-Cluster:"
+                   value:[NSString stringWithFormat:@"%d MHz (%.1f%%)",
+                                                    metrics.scluster_freq_mhz,
+                                                    metrics.scluster_active]];
+    }
     v = (MactopMetricView *)self.cpuWattsItem.view;
     [v setTwoToneLabel:@"Power:"
                  value:[NSString
@@ -1293,6 +1349,11 @@ void cleanupMenuBar(void) {
     [v setTwoToneLabel:@"Swap:"
                  value:[NSString stringWithFormat:@"%.1f / %.1f GB", swapUsedGB,
                                                   swapTotalGB]];
+    v = (MactopMetricView *)self.dramBwItem.view;
+    [v setTwoToneLabel:@"DRAM BW:"
+                 value:[NSString
+                           stringWithFormat:@"%.1f GB/s",
+                                            metrics.dram_bw_combined_gbs]];
 
     v = (MactopMetricView *)self.netItem.view;
     [v setTwoToneLabel:@"Network:"
@@ -1361,6 +1422,24 @@ void cleanupMenuBar(void) {
     iv.imageView.image =
         drawSparklineChart(memHistory, SPARKLINE_HISTORY_SIZE, memColor(),
                            @"MEM", memPct, memValStr);
+
+    // Fan data — show/hide individual items based on count
+    NSMenuItem *fanItems[4] = {self.fan0Item, self.fan1Item, self.fan2Item, self.fan3Item};
+    for (int i = 0; i < 4; i++) {
+      if (i < metrics.fan_count) {
+        fanItems[i].hidden = NO;
+        v = (MactopMetricView *)fanItems[i].view;
+        NSString *name = [NSString stringWithUTF8String:metrics.fan_name[i]];
+        if (name.length == 0) name = [NSString stringWithFormat:@"Fan %d", i];
+        [v setTwoToneLabel:[NSString stringWithFormat:@"%@:", name]
+                     value:[NSString stringWithFormat:@"%d RPM", metrics.fan_rpm[i]]];
+      } else {
+        fanItems[i].hidden = YES;
+      }
+    }
+    // Hide entire FANS section if no fans
+    self.fanHeaderItem.hidden = (metrics.fan_count == 0);
+    self.fanSepItem.hidden = (metrics.fan_count == 0);
   } // @autoreleasepool
 }
 @end
