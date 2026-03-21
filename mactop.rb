@@ -15,11 +15,37 @@ class Mactop < Formula
     def install
       bin.install "mactop"
     end
+
+    def service
+      run "#{opt_bin}/mactop -p :9101 --headless > /dev/null"
+      keep_alive true
+      error_log_path var/"log/mactop.error.log"
+      process_type :background
+      nice 10
+    end
   end
 
   def caveats
     <<~EOS
       mactop requires macOS 12+, and runs exclusively on Apple Silicon.
+
+      To run mactop as a background service:
+        brew services start mactop
+
+      To view service error logs:
+        brew services logs mactop
+
+      Prometheus metrics will be available at:
+        http://localhost:9101/metrics
+
+      To change the Prometheus port:
+        1. brew services stop mactop
+        2. brew services edit mactop
+        3. Change :9101 to your desired port
+        4. brew services start mactop
+
+      Or run manually with a custom port:
+        mactop -p :<PORT> --headless
     EOS
   end
 end
