@@ -1159,8 +1159,8 @@ static int readFanInfo(fan_info_t *fans, int maxFans) {
 
   // FNum is typically a ui8 (1 byte)
   int fanCount = (unsigned char)val.bytes[0];
-  if (fanCount <= 0 || fanCount > maxFans)
-    fanCount = (fanCount > maxFans) ? maxFans : fanCount;
+  if (fanCount > maxFans)
+    fanCount = maxFans;
 
   for (int i = 0; i < fanCount; i++) {
     char key[5];

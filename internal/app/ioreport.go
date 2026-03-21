@@ -158,7 +158,7 @@ type SocMetrics struct {
 
 func initSocMetrics() error {
 	if ret := C.initIOReport(); ret != 0 {
-		return nil
+		return fmt.Errorf("initIOReport failed with code %d", ret)
 	}
 	return nil
 }
