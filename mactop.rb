@@ -23,7 +23,6 @@ class Mactop < Formula
     log_path var/"log/mactop.log"
     error_log_path var/"log/mactop.error.log"
     process_type :background
-    require_root true
     nice 10
   end
 
@@ -47,7 +46,7 @@ class Mactop < Formula
         4. brew services start mactop
 
       Or run manually with a custom port:
-        sudo mactop -p <PORT> --headless
+        mactop -p <PORT> --headless
     EOS
   end
 end
