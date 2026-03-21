@@ -15,14 +15,14 @@ class Mactop < Formula
     def install
       bin.install "mactop"
     end
+  end
 
-    def service
-      run "#{opt_bin}/mactop -p :9101 --headless > /dev/null"
-      keep_alive true
-      error_log_path var/"log/mactop.error.log"
-      process_type :background
-      nice 10
-    end
+  def service
+    run "#{opt_bin}/mactop -p :9101 --headless > /dev/null"
+    keep_alive true
+    error_log_path var/"log/mactop.error.log"
+    process_type :background
+    nice 10
   end
 
   def caveats
