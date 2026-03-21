@@ -48,6 +48,9 @@ typedef struct {
   double tflops_fp32;
   char rdma_status[64];
   double dram_bw_combined_gbs;
+  int fan_count;
+  int fan_rpm[4];
+  char fan_name[4][32];
 } menubar_metrics_t;
 
 // Config passed from Go
@@ -312,6 +315,12 @@ static NSColor *headerColor(void) { return [NSColor labelColor]; }
 @property(strong, nonatomic) NSMenuItem *gpuSparkItem;
 @property(strong, nonatomic) NSMenuItem *aneSparkItem;
 @property(strong, nonatomic) NSMenuItem *memSparkItem;
+@property(strong, nonatomic) NSMenuItem *fanHeaderItem;
+@property(strong, nonatomic) NSMenuItem *fan0Item;
+@property(strong, nonatomic) NSMenuItem *fan1Item;
+@property(strong, nonatomic) NSMenuItem *fan2Item;
+@property(strong, nonatomic) NSMenuItem *fan3Item;
+@property(strong, nonatomic) NSMenuItem *fanSepItem;
 - (void)performMetricUpdate:(NSValue *)val;
 - (void)openSettings:(id)sender;
 - (void)statusBarClicked:(id)sender;
@@ -1091,6 +1100,19 @@ static void buildMenu(void) {
     [menu addItem:g_delegate.memSparkItem];
     [menu addItem:[NSMenuItem separatorItem]];
 
+    g_delegate.fanHeaderItem = makeHeaderItem(@"FANS");
+    [menu addItem:g_delegate.fanHeaderItem];
+    g_delegate.fan0Item = makeMetricItem(@"Fan 0:", @"\u2014");
+    [menu addItem:g_delegate.fan0Item];
+    g_delegate.fan1Item = makeMetricItem(@"Fan 1:", @"\u2014");
+    [menu addItem:g_delegate.fan1Item];
+    g_delegate.fan2Item = makeMetricItem(@"Fan 2:", @"\u2014");
+    [menu addItem:g_delegate.fan2Item];
+    g_delegate.fan3Item = makeMetricItem(@"Fan 3:", @"\u2014");
+    [menu addItem:g_delegate.fan3Item];
+    g_delegate.fanSepItem = [NSMenuItem separatorItem];
+    [menu addItem:g_delegate.fanSepItem];
+
     NSMenuItem *settingsItem =
         [[NSMenuItem alloc] initWithTitle:@"Settings\u2026"
                                    action:@selector(openSettings:)
@@ -1400,6 +1422,24 @@ void cleanupMenuBar(void) {
     iv.imageView.image =
         drawSparklineChart(memHistory, SPARKLINE_HISTORY_SIZE, memColor(),
                            @"MEM", memPct, memValStr);
+
+    // Fan data — show/hide individual items based on count
+    NSMenuItem *fanItems[4] = {self.fan0Item, self.fan1Item, self.fan2Item, self.fan3Item};
+    for (int i = 0; i < 4; i++) {
+      if (i < metrics.fan_count) {
+        fanItems[i].hidden = NO;
+        v = (MactopMetricView *)fanItems[i].view;
+        NSString *name = [NSString stringWithUTF8String:metrics.fan_name[i]];
+        if (name.length == 0) name = [NSString stringWithFormat:@"Fan %d", i];
+        [v setTwoToneLabel:[NSString stringWithFormat:@"%@:", name]
+                     value:[NSString stringWithFormat:@"%d RPM", metrics.fan_rpm[i]]];
+      } else {
+        fanItems[i].hidden = YES;
+      }
+    }
+    // Hide entire FANS section if no fans
+    self.fanHeaderItem.hidden = (metrics.fan_count == 0);
+    self.fanSepItem.hidden = (metrics.fan_count == 0);
   } // @autoreleasepool
 }
 @end

@@ -43,6 +43,9 @@ typedef struct {
     double tflops_fp32;
     char rdma_status[64];
     double dram_bw_combined_gbs;
+    int fan_count;
+    int fan_rpm[4];
+    char fan_name[4][32];
 } menubar_metrics_t;
 
 typedef struct {
@@ -340,6 +343,24 @@ func updateMenuBarFromPayload(p MenuBarMetricsPayload) {
 		cm.rdma_status[i] = C.char(b)
 	}
 	cm.rdma_status[len(rdmaBytes)] = 0
+
+	// Fans
+	fanCount := len(p.CPUMetrics.Fans)
+	if fanCount > 4 {
+		fanCount = 4
+	}
+	cm.fan_count = C.int(fanCount)
+	for i := 0; i < fanCount; i++ {
+		cm.fan_rpm[i] = C.int(p.CPUMetrics.Fans[i].ActualRPM)
+		nameBytes := []byte(p.CPUMetrics.Fans[i].Name)
+		if len(nameBytes) > 31 {
+			nameBytes = nameBytes[:31]
+		}
+		for j, b := range nameBytes {
+			cm.fan_name[i][j] = C.char(b)
+		}
+		cm.fan_name[i][len(nameBytes)] = 0
+	}
 
 	C.updateMenuBarMetrics((*C.menubar_metrics_t)(unsafe.Pointer(&cm)))
 }
