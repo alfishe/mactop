@@ -29,6 +29,11 @@ import (
 var uidCache = make(map[uint32]string)
 var uidCacheMutex sync.RWMutex
 
+// pidPathCache caches proc_pidpath results by PID.
+// A PID's executable path never changes during its lifetime.
+var pidPathCache = make(map[int]string)
+var pidPathCacheMutex sync.RWMutex
+
 func getUsername(uid uint32) string {
 	uidCacheMutex.RLock()
 	name, ok := uidCache[uid]
@@ -78,10 +83,22 @@ func processOsProc(kp C.struct_kinfo_proc, now time.Time, prevProcessTimes map[i
 	}
 
 	comm := C.GoString(&kp.kp_proc.p_comm[0])
-	var pathBuf [C.PROC_PIDPATHINFO_MAXSIZE]C.char
-	if C.proc_pidpath(C.int(pid), unsafe.Pointer(&pathBuf), C.PROC_PIDPATHINFO_MAXSIZE) > 0 {
-		fullPath := C.GoString(&pathBuf[0])
-		comm = filepath.Base(fullPath)
+
+	// Check pidpath cache first — paths never change for a living PID
+	pidPathCacheMutex.RLock()
+	cachedPath, hasCached := pidPathCache[pid]
+	pidPathCacheMutex.RUnlock()
+	if hasCached {
+		comm = cachedPath
+	} else {
+		var pathBuf [C.PROC_PIDPATHINFO_MAXSIZE]C.char
+		if C.proc_pidpath(C.int(pid), unsafe.Pointer(&pathBuf), C.PROC_PIDPATHINFO_MAXSIZE) > 0 {
+			fullPath := C.GoString(&pathBuf[0])
+			comm = filepath.Base(fullPath)
+		}
+		pidPathCacheMutex.Lock()
+		pidPathCache[pid] = comm
+		pidPathCacheMutex.Unlock()
 	}
 
 	rssBytes := int64(0)
@@ -218,6 +235,15 @@ func getProcessList(systemGpuPercent float64) ([]ProcessMetrics, error) {
 	}
 
 	prevProcessTimes = nextProcessTimes
+
+	// Evict stale entries from pidPathCache for PIDs no longer alive
+	pidPathCacheMutex.Lock()
+	for cachedPid := range pidPathCache {
+		if _, alive := nextProcessTimes[cachedPid]; !alive {
+			delete(pidPathCache, cachedPid)
+		}
+	}
+	pidPathCacheMutex.Unlock()
 
 	updateProcessGPUMetrics(processes, now, systemGpuPercent)
 

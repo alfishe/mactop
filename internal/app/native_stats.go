@@ -402,12 +402,18 @@ static uint64_t sum_gpu_time(CFArrayRef appUsage) {
     return total;
 }
 
+// Cached AGXAccelerator service handle — avoid IOServiceMatching every call
+static io_service_t g_agx_accelerator = 0;
+
 // Query AGXDeviceUserClient for per-process GPU statistics
 // AGXDeviceUserClient objects are children of AGXAccelerator, not standalone services
 int get_gpu_process_stats(gpu_process_stat_t *stats, int max_stats) {
-    // Find the AGXAccelerator service
-    CFMutableDictionaryRef match = IOServiceMatching("AGXAccelerator");
-    io_service_t accelerator = IOServiceGetMatchingService(kIOMainPortDefault, match);
+    // Cache the AGXAccelerator service — it never changes
+    if (g_agx_accelerator == 0) {
+        CFMutableDictionaryRef match = IOServiceMatching("AGXAccelerator");
+        g_agx_accelerator = IOServiceGetMatchingService(kIOMainPortDefault, match);
+    }
+    io_service_t accelerator = g_agx_accelerator;
     if (accelerator == 0) {
         return 0;
     }
@@ -464,7 +470,7 @@ int get_gpu_process_stats(gpu_process_stat_t *stats, int max_stats) {
         IOObjectRelease(child);
     }
     IOObjectRelease(childIter);
-    IOObjectRelease(accelerator);
+    // accelerator is cached — do not release
 
     return count;
 }

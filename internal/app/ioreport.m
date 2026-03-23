@@ -188,6 +188,10 @@ static int g_scpu_freq_count = 0;
 static temp_sensor_t g_all_temp_sensors[128];
 static int g_all_temp_sensor_count = 0;
 
+// Cached HID temperature client — creating one per call is extremely expensive
+static IOHIDEventSystemClientRef g_hidTempClient = NULL;
+static CFArrayRef g_hidTempServices = NULL;
+
 static int cfStringStartsWith(CFStringRef str, const char *prefix);
 static void loadSMCTempKeys();
 static void loadAllTempSensors();
@@ -1184,50 +1188,51 @@ static void loadAllTempSensors() {
   }
 }
 
-// Read fan data from SMC
+// Cached fan static data (min/max RPM and count never change)
+static fan_info_t g_cached_fans[8];
+static int g_cached_fan_count = -1;
+
+// Read fan data from SMC — caches static fields (min, max, name)
 static int readFanInfo(fan_info_t *fans, int maxFans) {
   if (!g_smcConn)
     return 0;
 
-  // Read number of fans
-  SMCKeyData_t val;
-  if (SMCReadKey(g_smcConn, "FNum", &val) != kIOReturnSuccess)
-    return 0;
+  // First call: read all fan info including static fields
+  if (g_cached_fan_count < 0) {
+    SMCKeyData_t val;
+    if (SMCReadKey(g_smcConn, "FNum", &val) != kIOReturnSuccess)
+      return 0;
 
-  // FNum is typically a ui8 (1 byte)
-  int fanCount = (unsigned char)val.bytes[0];
-  if (fanCount > maxFans)
-    fanCount = maxFans;
+    g_cached_fan_count = (unsigned char)val.bytes[0];
+    if (g_cached_fan_count > maxFans)
+      g_cached_fan_count = maxFans;
+    if (g_cached_fan_count > 8)
+      g_cached_fan_count = 8;
 
-  for (int i = 0; i < fanCount; i++) {
-    char key[5];
-    fans[i].id = i;
-
-    // Read actual RPM: F%dAc
-    snprintf(key, sizeof(key), "F%dAc", i);
-    fans[i].actualRPM = (int)SMCGetFloatValue(g_smcConn, key);
-
-    // Read min RPM: F%dMn
-    snprintf(key, sizeof(key), "F%dMn", i);
-    fans[i].minRPM = (int)SMCGetFloatValue(g_smcConn, key);
-
-    // Read max RPM: F%dMx
-    snprintf(key, sizeof(key), "F%dMx", i);
-    fans[i].maxRPM = (int)SMCGetFloatValue(g_smcConn, key);
-
-    // Read target RPM: F%dTg
-    snprintf(key, sizeof(key), "F%dTg", i);
-    fans[i].targetRPM = (int)SMCGetFloatValue(g_smcConn, key);
-
-    // Read mode: F%dMd (flt type — 0.0=auto, 1.0=forced)
-    snprintf(key, sizeof(key), "F%dMd", i);
-    fans[i].mode = (int)SMCGetFloatValue(g_smcConn, key);
-
-    // Fan name — use index-based naming
-    snprintf(fans[i].name, sizeof(fans[i].name), "Fan %d", i);
+    for (int i = 0; i < g_cached_fan_count; i++) {
+      char key[5];
+      g_cached_fans[i].id = i;
+      snprintf(key, sizeof(key), "F%dMn", i);
+      g_cached_fans[i].minRPM = (int)SMCGetFloatValue(g_smcConn, key);
+      snprintf(key, sizeof(key), "F%dMx", i);
+      g_cached_fans[i].maxRPM = (int)SMCGetFloatValue(g_smcConn, key);
+      snprintf(g_cached_fans[i].name, sizeof(g_cached_fans[i].name), "Fan %d", i);
+    }
   }
 
-  return fanCount;
+  // Every call: only read dynamic fields (actual RPM, target, mode)
+  for (int i = 0; i < g_cached_fan_count; i++) {
+    fans[i] = g_cached_fans[i]; // copy static fields
+    char key[5];
+    snprintf(key, sizeof(key), "F%dAc", i);
+    fans[i].actualRPM = (int)SMCGetFloatValue(g_smcConn, key);
+    snprintf(key, sizeof(key), "F%dTg", i);
+    fans[i].targetRPM = (int)SMCGetFloatValue(g_smcConn, key);
+    snprintf(key, sizeof(key), "F%dMd", i);
+    fans[i].mode = (int)SMCGetFloatValue(g_smcConn, key);
+  }
+
+  return g_cached_fan_count;
 }
 
 // Fan control functions
@@ -1312,31 +1317,35 @@ static float readSocTemperature(float *outCpuTemp, float *outGpuTemp) {
     }
   }
 
-  // Fallback to HID if SMC failed
+  // Fallback to HID if SMC failed — reuse cached client
   if (cpuCount == 0 || gpuCount == 0) {
-    // ... (HID logic) ...
-    const void *keys[2] = {CFSTR("PrimaryUsagePage"), CFSTR("PrimaryUsage")};
-    int page = kHIDPage_AppleVendor;
-    int usage = kHIDUsage_AppleVendor_TemperatureSensor;
-    CFNumberRef pageNum =
-        CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &page);
-    CFNumberRef usageNum =
-        CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &usage);
-    const void *values[2] = {pageNum, usageNum};
+    // Lazily create the HID temperature client once
+    if (g_hidTempClient == NULL) {
+      const void *keys[2] = {CFSTR("PrimaryUsagePage"), CFSTR("PrimaryUsage")};
+      int page = kHIDPage_AppleVendor;
+      int usage = kHIDUsage_AppleVendor_TemperatureSensor;
+      CFNumberRef pageNum =
+          CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &page);
+      CFNumberRef usageNum =
+          CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &usage);
+      const void *values[2] = {pageNum, usageNum};
 
-    CFDictionaryRef matching = CFDictionaryCreate(
-        kCFAllocatorDefault, keys, values, 2, &kCFTypeDictionaryKeyCallBacks,
-        &kCFTypeDictionaryValueCallBacks);
-    CFRelease(pageNum);
-    CFRelease(usageNum);
+      CFDictionaryRef matching = CFDictionaryCreate(
+          kCFAllocatorDefault, keys, values, 2, &kCFTypeDictionaryKeyCallBacks,
+          &kCFTypeDictionaryValueCallBacks);
+      CFRelease(pageNum);
+      CFRelease(usageNum);
 
-    IOHIDEventSystemClientRef client =
-        IOHIDEventSystemClientCreate(kCFAllocatorDefault);
-    if (client != NULL) {
-      IOHIDEventSystemClientSetMatching(client, matching);
+      g_hidTempClient = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
+      if (g_hidTempClient != NULL) {
+        IOHIDEventSystemClientSetMatching(g_hidTempClient, matching);
+      }
       CFRelease(matching);
+    }
 
-      CFArrayRef services = IOHIDEventSystemClientCopyServices(client);
+    // Re-copy services each time (lightweight — reuses cached client)
+    if (g_hidTempClient != NULL) {
+      CFArrayRef services = IOHIDEventSystemClientCopyServices(g_hidTempClient);
       if (services != NULL) {
         CFIndex count = CFArrayGetCount(services);
         for (CFIndex i = 0; i < count; i++) {
@@ -1370,7 +1379,7 @@ static float readSocTemperature(float *outCpuTemp, float *outGpuTemp) {
             if (strstr(product, "PMU tdie") != NULL ||
                 strstr(product, "pACC") != NULL ||
                 strstr(product, "eACC") != NULL) {
-              if (cpuCount == 0) { // Only use HID if SMC didn't find anything
+              if (cpuCount == 0) {
                 cpuSum += temp;
                 cpuCount++;
               }
@@ -1384,9 +1393,6 @@ static float readSocTemperature(float *outCpuTemp, float *outGpuTemp) {
         }
         CFRelease(services);
       }
-      CFRelease(client);
-    } else {
-      CFRelease(matching);
     }
   }
 
@@ -1735,17 +1741,27 @@ PowerMetrics samplePowerMetrics(int durationMs) {
   // Read fan data
   metrics.fanCount = readFanInfo(metrics.fans, 8);
 
-  // Read all temperature sensors
+  // Read all temperature sensors — refresh values every 4th call to reduce
+  // SMC overhead (each SMCGetFloatValue is a kernel IPC call, and there can
+  // be 50-100+ sensors on modern Macs).
   loadAllTempSensors();
+  static int tempRefreshCounter = 0;
+  tempRefreshCounter++;
   metrics.tempSensorCount = g_all_temp_sensor_count;
+  if (tempRefreshCounter >= 4) {
+    tempRefreshCounter = 0;
+    // Full refresh — read all sensor values from SMC
+    for (int i = 0; i < g_all_temp_sensor_count && i < 128; i++) {
+      if (g_smcConn) {
+        float v = (float)SMCGetFloatValue(g_smcConn, g_all_temp_sensors[i].key);
+        if (v > 0)
+          g_all_temp_sensors[i].value = v;
+      }
+    }
+  }
+  // Always copy cached sensor data to metrics
   for (int i = 0; i < g_all_temp_sensor_count && i < 128; i++) {
     metrics.temps[i] = g_all_temp_sensors[i];
-    // Refresh sensor value
-    if (g_smcConn) {
-      float v = (float)SMCGetFloatValue(g_smcConn, g_all_temp_sensors[i].key);
-      if (v > 0)
-        metrics.temps[i].value = v;
-    }
   }
 
   CFRelease(delta);
@@ -1762,6 +1778,10 @@ void cleanupIOReport() {
   if (g_smcConn) {
     SMCClose(g_smcConn);
     g_smcConn = 0;
+  }
+  if (g_hidTempClient != NULL) {
+    CFRelease(g_hidTempClient);
+    g_hidTempClient = NULL;
   }
   // Clean up kperf
   if (g_kperf_active && g_forceCtrs) {

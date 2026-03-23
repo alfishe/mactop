@@ -166,31 +166,6 @@ func collectNetDiskMetrics(done chan struct{}, netdiskMetricsChan chan NetDiskMe
 	}
 }
 
-// dispatchMetrics sends metrics to channels without blocking, checking done for exit.
-func dispatchMetrics(done chan struct{}, cpuCh chan CPUMetrics, gpuCh chan GPUMetrics,
-	tbCh chan []ThunderboltNetStats, triggerCh chan struct{},
-	cpu CPUMetrics, gpu GPUMetrics, tb []ThunderboltNetStats) bool {
-	select {
-	case <-done:
-		return true
-	case cpuCh <- cpu:
-	default:
-	}
-	select {
-	case gpuCh <- gpu:
-	default:
-	}
-	select {
-	case tbCh <- tb:
-	default:
-	}
-	select {
-	case triggerCh <- struct{}{}:
-	default:
-	}
-	return false
-}
-
 // getAvgCPUPercent returns the average CPU usage percentage across all cores.
 func getAvgCPUPercent() float64 {
 	percentages, err := GetCPUPercentages()
@@ -213,6 +188,7 @@ func collectMetrics(done chan struct{}, cpumetricsChan chan CPUMetrics, gpumetri
 		maxFP32TFLOPs = float64(sysInfo.GPUCoreCount) * float64(maxGPUFreq) * 0.000256
 	}
 
+	processTickCounter := 0
 	for {
 		start := time.Now()
 
@@ -274,8 +250,31 @@ func collectMetrics(done chan struct{}, cpumetricsChan chan CPUMetrics, gpumetri
 			tempSensorGauge.With(prometheus.Labels{"key": sensor.Key, "name": sensor.Name}).Set(sensor.Value)
 		}
 
-		if dispatchMetrics(done, cpumetricsChan, gpumetricsChan, tbNetStatsChan, triggerProcessCollectionChan, cpuMetrics, gpuMetrics, GetThunderboltNetStats()) {
+		// Dispatch SOC/GPU/TB metrics every tick
+		select {
+		case <-done:
 			return
+		case cpumetricsChan <- cpuMetrics:
+		default:
+		}
+		select {
+		case gpumetricsChan <- gpuMetrics:
+		default:
+		}
+		tbStats := GetThunderboltNetStats()
+		select {
+		case tbNetStatsChan <- tbStats:
+		default:
+		}
+
+		// Trigger process collection every 2nd tick to halve syscall overhead
+		processTickCounter++
+		if processTickCounter >= 2 {
+			processTickCounter = 0
+			select {
+			case triggerProcessCollectionChan <- struct{}{}:
+			default:
+			}
 		}
 
 		// Push to menubar worker — snapshot net metrics under lock to avoid race
